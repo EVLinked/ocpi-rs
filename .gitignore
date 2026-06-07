@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Vendored spec working clone (scripts/fetch-specs.sh checks this out transiently)
+/.spec-tmp
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local env
+.env
+*.log

@@ -1,0 +1,31 @@
+name: CodeQL
+
+# CodeQL static analysis for Rust. Rust support is comparatively new, so this
+# runs on a schedule (not on every PR) to avoid blocking or noisy checks. It is
+# NOT a required status check. Tighten to PRs once it is proven stable here.
+on:
+  schedule:
+    - cron: "42 3 * * 3" # weekly, Wednesday 03:42 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3

@@ -1,0 +1,6 @@
+source:     https://github.com/ocpi/ocpi.git
+branch:     release-2.2.1-bugfixes
+commit:     ca8c04c5c8cc10ad1be2a82f61b19377d98e2a67
+commit_date:2026-05-28 10:38:28 -0600
+fetched_by: scripts/fetch-specs.sh
+copyright:  (c) EV Roaming Foundation — see ../../NOTICE.md

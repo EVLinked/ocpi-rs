@@ -1,0 +1,33 @@
+# cargo-deny configuration. Verified for cargo-deny v0.16+ (version = 2 schema).
+# Run: cargo deny check
+
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses compatible with an MIT-licensed project.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate transitive versions are common; warn rather than fail.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

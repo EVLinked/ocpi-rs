@@ -1,0 +1,88 @@
+*Version History*
+
+[cols="4,5,6,16",options="header"]
+|===
+|Version |Date |Author |Description
+
+|2.2.1-d2 | 2023-09-07 |
+
+Jakub Karbownik +
+_Ekoenergetyka_ +
+Rudolph Froger +
+_TandemDrive_ +
+Robert de Leeuw +
+_EVA Global_ +
+Reinier Lamers +
+_ihomer_ | Documentation update.
+
+|2.2.1 |2021-10-06 |
+Robert de Leeuw +
+_ihomer_ +
+Reinier Lamers +
+_ihomer_ | final release of OCPI 2.2.1. +
+Added country_code and party_id to CdrToken class.
+
+Fixed datatype of CDR SignedData URL. +
+Improved some descriptions. +
+
+Fixed length of CDR SignedData, increased to 5000. +
+Change signed data related fields to string +
+postal_code optional in CdrLocation. +
+state added to CdrLocation. +
+AC_2_PHASE and AC_2_PHASE_SPLIT added to PowerType in Connector +
+Additional types added to ConnectorType in Connector +
+Added `connector_id` to StartSession command and `START_SESSION_CONNECTOR_REQUIRED` to EVSE Capabilities. +
+Added optional field: `home_charging_compensation` to CDR. +
+Improved description.examples Tariff for `step_size`
+
+|2.2-d2 |2020-06-12 | Robert de Leeuw +
+_ihomer_ | 2nd documentation revision of the OCPI 2.2 spec. +
+           Contains textual improvements and fixes some of the examples. +
+           Most improvements in the tarrifs module, especially `step_size` is better explained.
+|2.2 |2019-09-30 | Robert de Leeuw +
+_ihomer_ |Added support for Roaming Hubs +
+        Adds support for Platforms with multiple/different roles, additional roles +
+        Adds support for smart charging +
+        Lots of improvements to existing modules +
+        See <<changelog.asciidoc#changelog_changelog,changelog>>
+|2.1.1-d2 |2019-06-21 |Robert de Leeuw +
+                        ihomer |Fixes the command module documentation, fixes a lot of examples, lots of small textual improvements: see <<changelog.asciidoc#changelog_changelog,changelog>>
+|2.1.1 |2017-06-08 | Robert de Leeuw +
+                  _ihomer_  |Fixed 4 bugs found in OCPI 2.1, lots of small textual improvements: see <<changelog.asciidoc#changelog_changelog,changelog>>
+|2.1 |2016-04-08 | Robert de Leeuw +
+                _ihomer_  |Added <<mod_commands.asciidoc#mod_commands_commands_module,command module>>. +
+ Added support for <<mod_tokens.asciidoc#mod_tokens_real-time_authorization,real-time authorization>>. + 
+ Lots of small improvements: see <<changelog.asciidoc#changelog_changelog,changelog>> 
+|2.0-d2 |2016-02-15 | Robert de Leeuw +
+                   _ihomer_  |2nd documentation revision of the OCPI 2.0 spec. +
+ Only documentation updated: ConnectorType of Connector + 
+ was not visible, credentials clarified, location URL + 
+ segments incorrect (now string, was int), + 
+ minor textual updates. + 
+ DateTime with timezones is still an issue 
+|2.0 |2015-12-30 | Robert de Leeuw +
+                _ihomer_ +
+                 Simon Philips +
+                 _Becharged_ +
+                 Chris Zwirello +
+                 _The New Motion_ + 
+                 Simon Schilling
+                 |First official release of OCPI.
+|0.4 |2014-11-04 | Olger Warnier +
+                _The New Motion_  |First draft of OCPI. (Also known as Draft v4)
+|0.3 |2014-05-06 | Olger Warnier +
+                _The New Motion_  |First draft of OCPI. (Also known as Draft v3)
+|===
+
+*Document revisions*
+There can be multiple documentation revisions of the same version of the OCPI protocol.
+
+The newer documentation revisions of the same protocol version can never change the content of the messages: no new fields or renaming of fields. A new revision can only clarify/fix texts/descriptions and fix typos etc.
+
+These documentation revisions (not the first) will be named: d2, d3, d4 etc.
+
+Examples:
+
+- OCPI 2.1.1 is a different protocol version of OCPI than OCPI 2.1.
+
+- OCPI 2.2-d2 is the same protocol version as OCPI 2.2, but a newer documentation revision.

@@ -1,0 +1,4 @@
+# Every path is owned by the project owner. Combined with branch protection and
+# the auto-merge gate, this enforces: owner/owner-bot PRs auto-merge on green;
+# everyone else is reviewed and merged manually by the owner.
+* @duyhuynh-vn

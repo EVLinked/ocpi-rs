@@ -1,0 +1,31 @@
+name: Bug report
+description: Report incorrect behavior or a spec-conformance issue.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you observe, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: crate
+    attributes:
+      label: Crate & version
+      description: e.g. ocpi-types 0.1.0
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal steps, code, or payload that triggers the issue.
+    validations:
+      required: false
+  - type: input
+    id: spec
+    attributes:
+      label: Relevant OCPI spec section
+    validations:
+      required: false

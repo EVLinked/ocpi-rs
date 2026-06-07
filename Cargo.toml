@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ocpi-types",
+    "crates/ocpi-client",
+    "crates/ocpi-server",
+    "crates/ocpi-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["ocpi-rs contributors"]
+license = "MIT"
+repository = "https://github.com/EVLinked/ocpi-rs"
+homepage = "https://github.com/EVLinked/ocpi-rs"
+description = "A modern, production-grade OCPI (Open Charge Point Interface) implementation in Rust"
+keywords = ["ocpi", "ev", "charging", "roaming", "emsp"]
+categories = ["network-programming", "web-programming", "api-bindings"]
+
+[workspace.dependencies]
+# Internal crates
+ocpi-types = { version = "0.0.0", path = "crates/ocpi-types" }
+ocpi-client = { version = "0.0.0", path = "crates/ocpi-client" }
+ocpi-server = { version = "0.0.0", path = "crates/ocpi-server" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+
+# HTTP client (rustls to avoid system OpenSSL in CI / portable static builds)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
+
+# Server
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

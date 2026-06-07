@@ -1,0 +1,22 @@
+[package]
+name = "ocpi-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "OCPI server-side handler traits and optional axum routers for receiver interfaces."
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# Enables the `http` module: ready-made axum routers for OCPI receiver endpoints.
+axum = ["dep:axum"]
+
+[dependencies]
+ocpi-types.workspace = true
+thiserror.workspace = true
+axum = { workspace = true, optional = true }

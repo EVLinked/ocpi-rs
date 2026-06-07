@@ -1,0 +1,61 @@
+name: OCPI module implementation
+description: Implement (part of) an OCPI module for a specific version.
+title: "[<version>] <module>: <what>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for roadmap work. Keep it scoped to one reviewable PR
+        (≤ ~500 LOC). The nightly routine only implements issues approved by the
+        owner.
+  - type: dropdown
+    id: version
+    attributes:
+      label: OCPI version
+      options: ["2.1.1", "2.2", "2.2.1", "2.3.0", "2.0", "3.0 (scaffold)"]
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module
+      options:
+        - Versions
+        - Credentials
+        - Locations
+        - Sessions
+        - CDRs
+        - Tariffs
+        - Tokens
+        - Commands
+        - ChargingProfiles
+        - HubClientInfo
+        - Payments
+        - Common/Transport
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Spec reference
+      description: Link or path to the governing section, e.g. specs/ocpi/2.2.1/mod_locations.asciidoc
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist of what "done" means (types, serde round-trip tests, client/server wiring).
+      value: |
+        - [ ] Types added under the correct `v2_x_y` module
+        - [ ] serde round-trip test against a vendored spec example
+        - [ ] Explicit `status_code` for the unsupported/invalid case
+        - [ ] `cargo fmt`, `clippy -D warnings`, `cargo test`, `cargo deny` green
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / edge cases
+    validations:
+      required: false

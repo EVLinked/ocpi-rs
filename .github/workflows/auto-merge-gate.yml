@@ -1,0 +1,82 @@
+name: Auto-merge gate
+
+# Owner-trust governance:
+#   - Owner / owner-bot PRs: enable squash auto-merge (required checks then gate).
+#   - Everyone else: label `needs-review`, comment, do NOT auto-merge.
+#   - Any PR touching guarded paths or exceeding the size cap: `needs-human`.
+#
+# SECURITY: this uses `pull_request_target` (runs with repo token on PRs,
+# including forks). It MUST NOT check out or execute PR head code. It only reads
+# PR *metadata* via the GitHub API and labels/comments/enables auto-merge.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write # enable auto-merge
+  pull-requests: write # label + comment
+  issues: write # labels
+
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      OWNER_LOGIN: duyhuynh-vn
+      PR: ${{ github.event.pull_request.number }}
+      ACTION: ${{ github.event.action }}
+      SIZE_CAP: "800"
+    steps:
+      - name: Classify PR and apply policy
+        run: |
+          set -euo pipefail
+          meta="$(gh pr view "$PR" --repo "$REPO" --json author,authorAssociation,isDraft,additions,files)"
+          login="$(echo "$meta" | jq -r '.author.login // ""')"
+          assoc="$(echo "$meta" | jq -r '.authorAssociation // ""')"
+          draft="$(echo "$meta" | jq -r '.isDraft')"
+          additions="$(echo "$meta" | jq -r '.additions // 0')"
+          files="$(echo "$meta" | jq -r '.files[].path')"
+
+          guarded='^(\.github/|deny\.toml$|LICENSE$|Cargo\.lock$|.*\.ya?ml$|scripts/)'
+          risky=no
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if printf '%s\n' "$f" | grep -qE "$guarded"; then risky=yes; fi
+          done <<< "$files"
+          if [ "${additions:-0}" -gt "$SIZE_CAP" ]; then risky=yes; fi
+
+          trusted=no
+          if [ "$assoc" = "OWNER" ] || [ "$login" = "$OWNER_LOGIN" ]; then trusted=yes; fi
+
+          echo "PR #$PR by $login (assoc=$assoc) draft=$draft additions=$additions risky=$risky trusted=$trusted"
+
+          if [ "$draft" = "true" ]; then
+            echo "Draft PR — waiting."; exit 0
+          fi
+
+          if [ "$trusted" != "yes" ]; then
+            gh pr edit "$PR" --repo "$REPO" --add-label needs-review || true
+            if [ "$ACTION" = "opened" ] || [ "$ACTION" = "reopened" ]; then
+              gh pr comment "$PR" --repo "$REPO" --body "🔒 Thanks for the contribution! A maintainer (@$OWNER_LOGIN) will review and merge this manually. Auto-merge is reserved for the owner."
+            fi
+            exit 0
+          fi
+
+          if [ "$risky" = "yes" ]; then
+            gh pr edit "$PR" --repo "$REPO" --add-label needs-human || true
+            if [ "$ACTION" = "opened" ] || [ "$ACTION" = "reopened" ]; then
+              gh pr comment "$PR" --repo "$REPO" --body "⚠️ This PR touches guarded paths (\`.github/\`, dependencies, \`LICENSE\`, \`scripts/\`) or exceeds the size cap. Auto-merge is disabled — review and merge manually."
+            fi
+            exit 0
+          fi
+
+          gh pr edit "$PR" --repo "$REPO" --add-label automerge || true
+          gh pr merge "$PR" --repo "$REPO" --auto --squash
+          echo "Auto-merge enabled (squash). Required checks will gate the merge."

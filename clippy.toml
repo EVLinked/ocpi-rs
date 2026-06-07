@@ -1,0 +1,12 @@
+# Clippy configuration for ocpi-rs (valid keys only; verified against clippy 1.92).
+msrv = "1.82"
+cognitive-complexity-threshold = 30
+type-complexity-threshold = 250
+too-many-arguments-threshold = 8
+
+# Tests may use unwrap/expect for brevity.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Reject placeholder names in committed code.
+disallowed-names = ["foo", "bar", "baz", "quux"]

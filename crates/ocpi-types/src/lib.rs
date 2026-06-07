@@ -1,0 +1,43 @@
+//! # ocpi-types
+//!
+//! Typed, `serde`-serializable models for the **Open Charge Point Interface
+//! (OCPI)** — the EV charging roaming protocol between Charge Point Operators
+//! (CPOs) and e-Mobility Service Providers (eMSPs).
+//!
+//! This crate is the shared data contract used by `ocpi-client` and
+//! `ocpi-server`. It is deliberately transport-agnostic: it models the wire
+//! types, not the HTTP plumbing.
+//!
+//! ## Layout
+//!
+//! - [`envelope`] — the OCPI response envelope (`status_code`, `timestamp`, …).
+//! - [`status`] — the canonical OCPI [`OcpiStatusCode`] set.
+//! - [`common`] — common data types shared across modules.
+//! - [`version`] — version negotiation primitives.
+//! - `v2_1_1` / `v2_2_1` / `v2_3_0` — version-namespaced module models,
+//!   populated incrementally per the roadmap milestones.
+//!
+//! ## Design philosophy
+//!
+//! Defer *logic*, not *schema*: types are forward-compatible from day one.
+//! Reject the unsupported case explicitly (a distinct [`OcpiStatusCode`])
+//! rather than silently dropping data, and keep field semantics aligned with
+//! the governing OCPI specification.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod common;
+pub mod envelope;
+pub mod error;
+pub mod status;
+pub mod version;
+
+pub mod v2_1_1;
+pub mod v2_2_1;
+pub mod v2_3_0;
+
+pub use envelope::OcpiResponse;
+pub use error::OcpiError;
+pub use status::OcpiStatusCode;
+pub use version::{Version, VersionNumber};

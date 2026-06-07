@@ -1,0 +1,18 @@
+[package]
+name = "ocpi-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Async OCPI HTTP client (sender role): version negotiation, credentials handshake, typed module senders."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+ocpi-types.workspace = true
+reqwest.workspace = true
+url.workspace = true
+thiserror.workspace = true

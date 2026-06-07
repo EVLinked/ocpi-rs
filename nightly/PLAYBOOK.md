@@ -1,0 +1,67 @@
+# Nightly Development Playbook
+
+This is the operating manual for the autonomous nightly routine. **Read it
+first, every run.** Update it at the end of a run when you learn something that
+would make the next run better. It compounds — that is the whole point.
+
+## Mission
+
+Implement the full OCPI standard (all versions) in Rust, one issue per night,
+following the milestones in [`../README.md`](../README.md). OCPI **2.2.1** is
+the primary target; 2.1.1, 2.2, 2.0, and 2.3.0 follow.
+
+## The loop (each night)
+
+1. **Learn.** Read this file, `LEARNINGS.md`, and the last `JOURNAL.md` entry.
+2. **Sync.** `gh pr list`. If a prior nightly PR has failing CI or review
+   comments, fixing it is tonight's job. Never keep more than 2 open nightly PRs.
+3. **Groom.** If the earliest open milestone has fewer than 3 well-scoped
+   *owner-approved* issues, diff the vendored spec (`../specs/ocpi/<v>/`) against
+   the current crates and propose new issues for the owner. On Sundays, groom
+   harder and update the README milestone checklist via PR.
+4. **Pick.** Highest-priority owner-approved issue in the earliest milestone.
+   Comment `🌙 Nightly dev picking this up — <date>`.
+5. **Plan.** Module boundaries, data flow, failure modes, test matrix — before
+   writing code. Apply gstack `plan-eng-review` rigor (clone gstack, read the
+   SKILL.md; slash commands are not available in the remote runner).
+6. **Implement** on `nightly/YYYY-MM-DD-issue-<N>`, ≤ ~500 LOC, idiomatic Rust.
+7. **Verify** (must pass): `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+   `cargo test --workspace --all-features`, `cargo deny check`.
+8. **Ship.** Open a PR: `Closes #<N>`, spec section link, test plan, known gaps.
+   Then `gh pr merge --auto --squash`. If the diff touches `.github/`, deps,
+   `LICENSE`, or `scripts/`, label `needs-human` and do **not** enable auto-merge.
+9. **Record.** Append a `JOURNAL.md` entry and update `LEARNINGS.md` if you
+   learned something durable. Include those edits in the PR.
+
+## Trust rule (non-negotiable)
+
+Only **implement** issues created or approved by the owner (`duyhuynh-vn`). For
+anyone else's issue: comment, label, ask the owner to review. Never implement an
+unapproved issue.
+
+## Spec-fidelity rules
+
+- Defer logic, not schema. Ship the forward-compatible type now.
+- Reject the unsupported case with an explicit OCPI `status_code`; never silently
+  drop data.
+- Role is declared in the handshake, never inferred. Fields absent from the spec
+  stay unwired.
+- The vendored spec under `../specs/ocpi/` is the source of truth. When in doubt,
+  read the asciidoc.
+
+## Guardrails
+
+Never push to `main`. Never force-push or rewrite history. Never edit CI/workflow
+permissions or secrets. No new dependencies without justification in the PR body.
+Ambiguous direction → open a `question` issue instead of guessing. If GitHub auth
+fails, STOP and report — do no throwaway work.
+
+## Where things are
+
+- Types/envelope/status: `crates/ocpi-types/src/`
+- Client: `crates/ocpi-client/src/`
+- Server traits + axum: `crates/ocpi-server/src/`
+- CLI: `crates/ocpi-cli/src/`
+- Conventions: `rustfmt.toml`, `clippy.toml`, `deny.toml`
+- Specs: `specs/ocpi/<version>/`

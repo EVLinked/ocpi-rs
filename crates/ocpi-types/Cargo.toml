@@ -1,0 +1,20 @@
+[package]
+name = "ocpi-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Typed OCPI protocol models: response envelope, status codes, common data types, version negotiation."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
