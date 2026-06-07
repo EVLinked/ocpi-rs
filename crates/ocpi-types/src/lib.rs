@@ -17,6 +17,11 @@
 //! - `v2_1_1` / `v2_2_1` / `v2_3_0` — version-namespaced module models,
 //!   populated incrementally per the roadmap milestones.
 //!
+//! ## Layout (continued)
+//!
+//! - [`transport`] — HTTP transport conventions: token auth, routing headers,
+//!   pagination params and response metadata.
+//!
 //! ## Design philosophy
 //!
 //! Defer *logic*, not *schema*: types are forward-compatible from day one.
@@ -31,6 +36,7 @@ pub mod common;
 pub mod envelope;
 pub mod error;
 pub mod status;
+pub mod transport;
 pub mod version;
 
 pub mod v2_1_1;
