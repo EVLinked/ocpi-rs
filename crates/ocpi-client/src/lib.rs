@@ -13,7 +13,10 @@ mod error;
 
 pub use error::ClientError;
 
-use ocpi_types::{version::Version, OcpiResponse};
+use ocpi_types::{
+    version::{Version, VersionDetails},
+    OcpiResponse,
+};
 use url::Url;
 
 /// A configured OCPI client pointed at one remote party's API base URL.
@@ -61,6 +64,28 @@ impl OcpiClient {
             .await?
             .error_for_status()?;
         let envelope: OcpiResponse<Vec<Version>> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Fetch the endpoint details for a specific OCPI version (`GET <url>`).
+    ///
+    /// The `url` comes from the `url` field of a [`Version`] entry returned by
+    /// [`Self::versions`]. Pass it directly — no base-URL joining is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails, the URL is invalid, or the
+    /// envelope reports success without any data.
+    pub async fn version_details(&self, url: &str) -> Result<VersionDetails, ClientError> {
+        let parsed = url::Url::parse(url)?;
+        let response = self
+            .http
+            .get(parsed)
+            .header("Authorization", format!("Token {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?;
+        let envelope: OcpiResponse<VersionDetails> = response.json().await?;
         envelope.data.ok_or(ClientError::EmptyData)
     }
 }

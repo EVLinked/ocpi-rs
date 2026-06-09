@@ -63,3 +63,18 @@ cycle. Keep entries short and specific. Prune contradictions.
 - **`Link` header format** — `<URL>; rel="next"`, comma-separated for multiple
   relations. Absent on the last page. `X-Limit` reflects the server's upper bound,
   not the count actually returned.
+- **`async_fn_in_trait` + axum incompatibility** — Axum requires handler futures
+  to be `Send`. `async_fn_in_trait` does not guarantee `Send` on the returned
+  future. Do NOT wire an `async_fn_in_trait` trait directly to an axum generic
+  handler. Use a concrete struct (e.g. `VersionsConfig`) as axum `State` instead,
+  and keep the trait as a standalone interface for non-axum uses.
+- **`#[serde(untagged)]` on a single variant is invalid** — Apply `untagged` to
+  the whole enum or not at all. Per-variant `untagged` on a tuple variant inside
+  an otherwise-tagged enum does not work as a catch-all; it compiles but
+  deserialization will be wrong. Use a custom `Deserialize` impl for catch-all
+  unknown string variants.
+- **Clippy `unnecessary_lazy_evaluations`** — `Option::ok_or_else(|| T)` is
+  flagged when `T` is cheap to construct (not a method call with side effects).
+  Use `ok_or(T)` for simple enum variants.
+- **Clippy `unnecessary_get_then_check`** — `map.get(k).is_none()` should be
+  `!map.contains_key(k)`; `map.get(k).is_some()` should be `map.contains_key(k)`.

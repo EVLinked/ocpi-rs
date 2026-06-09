@@ -5,6 +5,42 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-09 — M2 version information (issue #9)
+
+- **Issue:** #9 — M2: /versions + version details (client + server)
+- **Branch:** `nightly/2026-06-09-issue-9`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (59 tests) `deny check` ✅
+- **What shipped:** `ocpi-types::version` additions —
+  - `ModuleID` enum (9 spec variants: cdrs, chargingprofiles, commands, credentials,
+    hubclientinfo, locations, sessions, tariffs, tokens); serde as lowercase
+  - `InterfaceRole` enum (SENDER/RECEIVER); serde as SCREAMING_SNAKE
+  - `Endpoint` struct: identifier + role + url (all spec-faithful field names)
+  - `VersionDetails` struct: version + endpoints
+  - `FromStr` + `Display` for `VersionNumber` (used in axum path extraction)
+  - `Version.url` upgraded from `String` → `Url` (validated, max-255)
+  - 11 new unit tests including two spec-example round-trips
+  - `ocpi-client`: `version_details(&self, url: &str)` method
+  - `ocpi-server`: `VersionsHandler` trait, `VersionsConfig` struct (with
+    `VersionsHandler` impl), axum `versions_router(config)` — real handlers for
+    `GET /versions` and `GET /versions/{version}`
+- **Groomed:** closed #15 (already merged via PR #18); created #19 (M2 version
+  negotiation helper) to bring M2 to 3 owner-approved issues
+- **Clippy traps:** `Version` import unused in axum submodule; `ok_or_else`
+  flagged as `unnecessary_lazy_evaluations` (use `ok_or` when error is not costly
+  to construct); `get().is_none()` flagged — use `!contains_key()` instead
+- **Custom module IDs:** `#[serde(untagged)]` per-variant is NOT standard serde.
+  `ModuleID::Other(String)` was dropped; unknown module IDs fail deserialization.
+  A future issue should add proper catch-all support.
+- **async_fn_in_trait + axum:** the `VersionsHandler` trait uses
+  `async_fn_in_trait` but is NOT wired directly to the axum router (to avoid
+  `Send`-bound issues). The router uses `VersionsConfig` directly. The trait is
+  provided for custom, non-axum implementations.
+- **Next:** #19 (M2 version negotiation helper, P1) or #10 (M2 credentials
+  handshake, P1). Suggest #10 next — it completes M2 and is the harder piece.
+
+---
+
 ## 2026-06-09 — M1 scalar primitives (issue #15)
 
 - **Issue:** #15 — M1: Role enum and primitive scalar types (CiString, Url)
