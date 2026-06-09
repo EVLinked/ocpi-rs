@@ -25,6 +25,16 @@ cycle. Keep entries short and specific. Prune contradictions.
 - **No DB in the core.** This is a library; CI needs no Postgres service. Keep
   the server's default store in-memory and feature-gate anything heavier.
 
+## Rust type system
+
+- **`#[derive(Hash)]` with manual `PartialEq` is a clippy error** (`derived_hash_with_manual_eq`,
+  deny-by-default under `-D warnings`). When `PartialEq` is case-insensitive, implement
+  `Hash` manually too — hash `.to_ascii_lowercase()` so `a == b → hash(a) == hash(b)`.
+- **Const-generic newtypes for bounded strings** — `struct Foo<const N: usize>(String)` is
+  ergonomic in Rust 1.65+. Serde requires a manual impl (no derive support for const
+  generics); the pattern is `Serialize → serialize_str` and `Deserialize → String::deserialize +
+  TryFrom`.
+
 ## Serde patterns
 
 - **Serialize an enum as its integer value** (not variant name): use `#[serde(from = "u16", into = "u16")]` on the enum + `impl From<u16>` (infallible) + `impl From<MyEnum> for u16`. No manual `Serialize`/`Deserialize` impl needed. Works for any `Copy`/`Clone` enum.
