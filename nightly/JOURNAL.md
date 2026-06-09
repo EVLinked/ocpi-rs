@@ -5,6 +5,32 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-09 — M1 scalar primitives (issue #15)
+
+- **Issue:** #15 — M1: Role enum and primitive scalar types (CiString, Url)
+- **Branch:** `nightly/2026-06-09-issue-15`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ `deny check` ✅ (52 tests pass)
+- **What shipped:** `ocpi-types::common` additions —
+  - `Role` enum (7 variants: CPO, EMSP, HUB, NAP, NSP, OTHER, SCSP) with serde
+  - `CiString<const MAX: usize>` const-generic newtype with printable-ASCII + max-length
+    validation via `TryFrom`; `PartialEq` is case-insensitive (hash is lowercased too)
+  - Type aliases: `CiString2`, `CiString3`, `CiString36`, `CiString255`
+  - `Url` newtype: max-255-byte validated string with `TryFrom` + serde
+  - Crate-level re-exports for all new public types
+  - 14 new unit tests (all green)
+- **No new dependencies.** No Cargo.toml changes.
+- **Clippy trap:** `#[derive(Hash)]` with a manual `PartialEq` triggers
+  `derived_hash_with_manual_eq`. Must implement `Hash` manually so the lowercased
+  hash is consistent with the case-insensitive `PartialEq`.
+- **What worked:** const-generic `CiString<N>` is zero-extra-cost and covers all
+  spec lengths (2, 3, 36, 255) from one definition.
+- **Next:** #9 (M2: `/versions` + version details, P1) — `Role`, `CiString`, `Url`
+  are the last M1 blockers. #17 (client Authorization header Base64-encode, P2)
+  can run in parallel.
+
+---
+
 ## 2026-06-07 — M1 transport layer (issue #6)
 
 - **Issue:** #6 — M1: Transport layer — headers, Token auth, pagination
