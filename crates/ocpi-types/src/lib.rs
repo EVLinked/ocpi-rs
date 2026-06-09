@@ -43,7 +43,7 @@ pub mod v2_1_1;
 pub mod v2_2_1;
 pub mod v2_3_0;
 
-pub use envelope::OcpiResponse;
+pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use version::{Version, VersionNumber};

@@ -25,6 +25,12 @@ cycle. Keep entries short and specific. Prune contradictions.
 - **No DB in the core.** This is a library; CI needs no Postgres service. Keep
   the server's default store in-memory and feature-gate anything heavier.
 
+## Serde patterns
+
+- **Serialize an enum as its integer value** (not variant name): use `#[serde(from = "u16", into = "u16")]` on the enum + `impl From<u16>` (infallible) + `impl From<MyEnum> for u16`. No manual `Serialize`/`Deserialize` impl needed. Works for any `Copy`/`Clone` enum.
+- **`Display` needed when changing a field type**: if downstream code formats a field with `{}`, changing that field's type (e.g., `u16` → `MyEnum`) requires `impl Display` on the new type, or the format call won't compile.
+- **`Option<OcpiStatusCode>` vs plain `OcpiStatusCode`**: once you have an `Unknown(u16)` catch-all variant, `from_code` can stay `Option<Self>` for the _known_ lookup while `From<u16>` gives the infallible path. This keeps existing call sites that `expect("known code")` working unchanged.
+
 ## OCPI domain
 
 - **`status_code` is an integer in the body**, independent of the HTTP status.
