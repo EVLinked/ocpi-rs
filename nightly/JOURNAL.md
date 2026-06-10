@@ -5,6 +5,36 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-10 — M2 credentials handshake types + trait (issue #10)
+
+- **Issue:** #10 — M2: Credentials handshake (POST/PUT/DELETE /credentials)
+- **Branch:** `nightly/2026-06-10-issue-10`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (77 tests) `deny check` ✅
+- **What shipped:**
+  - `ocpi-types::v2_2_1` additions — `CredentialsRole` + `Credentials` structs
+    (token: String, url: Url, roles: Vec<CredentialsRole>); serde round-trip,
+    spec examples, `validate()` (non-empty roles), `check_single_role()` (helper
+    for servers that have not yet implemented multi-role support)
+  - `ocpi-server` — replaced stub `CredentialsHandler` with 4-method trait
+    (get_credentials, register, update_credentials, delete_credentials);
+    added `ServerError::AlreadyRegistered` + `ServerError::NotRegistered`
+    (both map to `ClientError` (2000); axum layer should return HTTP 405)
+  - `ocpi-client` — 4 matching methods (get_credentials, register,
+    update_credentials, delete_credentials); `delete_credentials` uses
+    `error_for_status()` at HTTP level (no body expected)
+  - 8 new tests in `v2_2_1`, 2 in `ocpi-server`, 2 in `ocpi-client`
+- **Axum router deferred:** `async_fn_in_trait` + axum `Send` bound issue
+  applies here too. No concrete `CredentialsConfig` in this PR — axum
+  integration for credentials is a follow-up issue.
+- **Multi-role deferred:** schema is `Vec<CredentialsRole>` (forward-compatible);
+  `check_single_role()` lets implementations reject >1 role with a clear error.
+- **No Cargo.toml changes.** (No `needs-human` flag required.)
+- **Next:** #19 (M2 version negotiation helper, P1) — last P1 in M2; completing
+  it wraps up the M2 scope. Then groom M3 issues.
+
+---
+
 ## 2026-06-09 — M2 version information (issue #9)
 
 - **Issue:** #9 — M2: /versions + version details (client + server)
