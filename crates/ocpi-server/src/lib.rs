@@ -154,7 +154,7 @@ impl VersionsHandler for VersionsConfig {
 ///   `delete_credentials` when the caller is not yet registered (HTTP 405).
 /// - Calling [`Credentials::check_single_role`] if multi-role is not yet
 ///   supported, and returning [`ServerError::Ocpi`] wrapping
-///   [`OcpiStatusCode::ServerError`](ocpi_types::OcpiStatusCode::ServerError).
+///   [`OcpiStatusCode::ServerError`].
 ///
 /// Spec: `specs/ocpi/2.2.1/credentials.asciidoc`
 #[allow(async_fn_in_trait)]
