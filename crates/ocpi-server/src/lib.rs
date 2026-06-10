@@ -11,6 +11,7 @@
 #![warn(missing_docs)]
 
 use ocpi_types::{
+    v2_2_1::Credentials,
     version::{Version, VersionDetails, VersionNumber},
     OcpiStatusCode,
 };
@@ -31,6 +32,16 @@ pub enum ServerError {
     /// The requested operation is not yet implemented.
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
+
+    /// A `POST /credentials` was received from a party that is already
+    /// registered. The axum layer should respond with HTTP 405.
+    #[error("already registered")]
+    AlreadyRegistered,
+
+    /// A `PUT` or `DELETE /credentials` was received from a party that has
+    /// not yet registered. The axum layer should respond with HTTP 405.
+    #[error("not registered")]
+    NotRegistered,
 }
 
 impl ServerError {
@@ -41,6 +52,7 @@ impl ServerError {
         match self {
             Self::Ocpi(ocpi_types::OcpiError::Status(code)) => *code,
             Self::Unauthorized => OcpiStatusCode::ClientError,
+            Self::AlreadyRegistered | Self::NotRegistered => OcpiStatusCode::ClientError,
             Self::Ocpi(_) | Self::NotImplemented(_) => OcpiStatusCode::ServerError,
         }
     }
@@ -121,9 +133,12 @@ impl VersionsHandler for VersionsConfig {
     }
 
     async fn version_details(&self, version: VersionNumber) -> Result<VersionDetails, ServerError> {
-        self.details.get(&version).cloned().ok_or(ServerError::Ocpi(
-            ocpi_types::OcpiError::Status(OcpiStatusCode::UnsupportedVersion),
-        ))
+        self.details
+            .get(&version)
+            .cloned()
+            .ok_or(ServerError::Ocpi(ocpi_types::OcpiError::Status(
+                OcpiStatusCode::UnsupportedVersion,
+            )))
     }
 }
 
@@ -131,18 +146,59 @@ impl VersionsHandler for VersionsConfig {
 
 /// Handles the OCPI credentials / registration handshake (receiver role).
 ///
-/// Implementors persist the presented token and exchange endpoint information
-/// per the OCPI `credentials` module.
+/// All four spec methods are required. Implementors are responsible for:
+/// - Persisting/revoking credentials tokens.
+/// - Returning [`ServerError::AlreadyRegistered`] from `register` when the
+///   caller is already known (the axum layer turns this into HTTP 405).
+/// - Returning [`ServerError::NotRegistered`] from `update_credentials` and
+///   `delete_credentials` when the caller is not yet registered (HTTP 405).
+/// - Calling [`Credentials::check_single_role`] if multi-role is not yet
+///   supported, and returning [`ServerError::Ocpi`] wrapping
+///   [`OcpiStatusCode::ServerError`](ocpi_types::OcpiStatusCode::ServerError).
+///
+/// Spec: `specs/ocpi/2.2.1/credentials.asciidoc`
 #[allow(async_fn_in_trait)]
 pub trait CredentialsHandler {
-    /// Handle an inbound credentials registration (`POST /credentials`),
-    /// authenticated by the bearer `token`.
+    /// Return this server's own [`Credentials`] (`GET /credentials`).
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the token is rejected or the handshake
-    /// cannot be completed.
-    async fn register(&self, token: &str) -> Result<(), ServerError>;
+    /// Returns [`ServerError::Unauthorized`] when `token` is not recognised.
+    async fn get_credentials(&self, token: &str) -> Result<Credentials, ServerError>;
+
+    /// Register a new party and return the server's credentials for them
+    /// (`POST /credentials`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ServerError::Unauthorized`] — `token` not recognised.
+    /// - [`ServerError::AlreadyRegistered`] — caller already registered (→ HTTP 405).
+    async fn register(
+        &self,
+        token: &str,
+        credentials: Credentials,
+    ) -> Result<Credentials, ServerError>;
+
+    /// Update an existing registration and return the refreshed server
+    /// credentials (`PUT /credentials`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ServerError::Unauthorized`] — `token` not recognised.
+    /// - [`ServerError::NotRegistered`] — caller not yet registered (→ HTTP 405).
+    async fn update_credentials(
+        &self,
+        token: &str,
+        credentials: Credentials,
+    ) -> Result<Credentials, ServerError>;
+
+    /// Revoke a registration (`DELETE /credentials`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ServerError::Unauthorized`] — `token` not recognised.
+    /// - [`ServerError::NotRegistered`] — caller not yet registered (→ HTTP 405).
+    async fn delete_credentials(&self, token: &str) -> Result<(), ServerError>;
 }
 
 // ── axum integration ──────────────────────────────────────────────────────────
@@ -227,6 +283,22 @@ mod tests {
         assert_eq!(
             ServerError::NotImplemented("credentials").status_code(),
             OcpiStatusCode::ServerError
+        );
+    }
+
+    #[test]
+    fn already_registered_maps_to_client_error() {
+        assert_eq!(
+            ServerError::AlreadyRegistered.status_code(),
+            OcpiStatusCode::ClientError
+        );
+    }
+
+    #[test]
+    fn not_registered_maps_to_client_error() {
+        assert_eq!(
+            ServerError::NotRegistered.status_code(),
+            OcpiStatusCode::ClientError
         );
     }
 
