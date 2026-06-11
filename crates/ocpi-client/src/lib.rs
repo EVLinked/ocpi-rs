@@ -14,6 +14,7 @@ mod error;
 pub use error::ClientError;
 
 use ocpi_types::{
+    transport::CredentialToken,
     v2_2_1::Credentials,
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
@@ -36,28 +37,59 @@ fn select_version<'a>(remote: &'a [Version], supported: &[VersionNumber]) -> Opt
 /// The `base_url` should be the versioned module base (it is joined with
 /// relative paths like `versions`), and `token` is the OCPI authorization
 /// token presented as `Authorization: Token <token>`.
+///
+/// By default the token is Base64-encoded per OCPI 2.2.1 §4.1.1.
+/// Set `compat_raw_token = true` (via [`Self::with_compat_raw_token`]) to send
+/// the raw token instead, for interoperability with OCPI 2.1.1/2.2 peers.
 #[derive(Debug, Clone)]
 pub struct OcpiClient {
     base_url: Url,
     token: String,
     http: reqwest::Client,
+    /// When `true`, the token is sent raw (not Base64-encoded).
+    /// Use only when connecting to legacy 2.1.1/2.2 peers.
+    compat_raw_token: bool,
 }
 
 impl OcpiClient {
     /// Create a client targeting `base_url`, authenticating with `token`.
+    ///
+    /// Token encoding defaults to Base64 (OCPI 2.2.1). Use
+    /// [`Self::with_compat_raw_token`] to opt into the raw-token mode for
+    /// legacy peers.
     #[must_use]
     pub fn new(base_url: Url, token: impl Into<String>) -> Self {
         Self {
             base_url,
             token: token.into(),
             http: reqwest::Client::new(),
+            compat_raw_token: false,
         }
+    }
+
+    /// Override the token encoding mode.
+    ///
+    /// - `false` (default): token is Base64-encoded per OCPI 2.2.1.
+    /// - `true`: token is sent raw; use with legacy 2.1.1/2.2 peers.
+    #[must_use]
+    pub fn with_compat_raw_token(mut self, compat: bool) -> Self {
+        self.compat_raw_token = compat;
+        self
     }
 
     /// The configured base URL.
     #[must_use]
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// Build the `Authorization` header value for outbound requests.
+    fn auth_header_value(&self) -> String {
+        if self.compat_raw_token {
+            format!("Token {}", self.token)
+        } else {
+            CredentialToken::new(&self.token).to_header_value()
+        }
     }
 
     /// Fetch the remote party's supported versions (`GET /versions`).
@@ -71,7 +103,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(url)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -93,7 +125,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -115,7 +147,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -141,7 +173,7 @@ impl OcpiClient {
         let response = self
             .http
             .post(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .json(credentials)
             .send()
             .await?
@@ -167,7 +199,7 @@ impl OcpiClient {
         let response = self
             .http
             .put(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .json(credentials)
             .send()
             .await?
@@ -210,7 +242,7 @@ impl OcpiClient {
         let parsed = url::Url::parse(url)?;
         self.http
             .delete(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -354,5 +386,36 @@ mod tests {
         // url crate may or may not parse this; what matters is the client
         // would propagate the error. We just confirm the parse path exists.
         let _ = result;
+    }
+
+    // ── Authorization header encoding ─────────────────────────────────────────
+
+    #[test]
+    fn default_client_sends_base64_encoded_token() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "my-raw-token");
+        let header = client.auth_header_value();
+        // "my-raw-token" in Base64 (RFC 4648 standard alphabet) = "bXktcmF3LXRva2Vu"
+        assert_eq!(header, "Token bXktcmF3LXRva2Vu");
+    }
+
+    #[test]
+    fn compat_client_sends_raw_token() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "my-raw-token")
+            .with_compat_raw_token(true);
+        assert_eq!(client.auth_header_value(), "Token my-raw-token");
+    }
+
+    #[test]
+    fn compat_builder_preserves_other_fields() {
+        let base = Url::parse("https://example.com/ocpi/").unwrap();
+        let client = OcpiClient::new(base.clone(), "tok").with_compat_raw_token(true);
+        assert_eq!(client.base_url(), &base);
+        assert!(client.compat_raw_token);
+    }
+
+    #[test]
+    fn compat_false_is_default() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "tok");
+        assert!(!client.compat_raw_token);
     }
 }

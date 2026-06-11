@@ -5,6 +5,25 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 (run 2) — M1: Authorization header Base64-encode (issue #17)
+
+- **Issue:** #17 — M1: `ocpi-client` Authorization header — Base64-encode token per OCPI 2.2.1 spec
+- **Branch:** `nightly/2026-06-11-issue-17`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (96 tests, +8 new) `deny check` ✅ (pre-existing warnings only)
+- **What shipped:**
+  - `ocpi-types::transport::CredentialToken` — new `from_header_value_lenient()` method: tries Base64 decode first, falls back to raw string for legacy 2.1.1/2.2 peers. Strict `from_header_value()` unchanged.
+  - 4 new tests for `from_header_value_lenient` in `ocpi-types`
+  - `ocpi-client::OcpiClient` — added `compat_raw_token: bool` field (default `false` = Base64 per OCPI 2.2.1); `with_compat_raw_token(bool) -> Self` builder; private `auth_header_value()` helper; all 5 outbound request methods updated to use the helper
+  - 4 new tests in `ocpi-client`: default encodes, compat sends raw, builder preserves fields, default-false
+- **No Cargo.toml changes.** (No `needs-human` flag.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) still open, `needs-human`. CI ✅, no review comments.
+- **Known gap:** PR #24's credential router uses strict `from_header_value()`. Once merged, a follow-up should update it to `from_header_value_lenient()` for backward-compat server-side handling.
+- **What worked:** Using `CredentialToken` from `ocpi-types` in the client (already a dep) kept this zero-dependency-change. The builder pattern (`with_compat_raw_token`) is ergonomic and non-breaking.
+- **Next:** #23 (M2 end-to-end smoke test) — blocked on PR #24 merging. While waiting: #7 (common data types: Price, EnergyMix) or #12/#13 (CI/security, touch `.github/` → `needs-human`). Suggest #7 next.
+
+---
+
 ## 2026-06-11 — M2 version negotiation helper (issue #19)
 
 - **Issue:** #19 — M2: `OcpiClient::negotiate_version` — select best shared OCPI version

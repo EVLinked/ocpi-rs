@@ -53,6 +53,13 @@ cycle. Keep entries short and specific. Prune contradictions.
   standard alphabet) encoding of the raw credentials token. 2.1.1/2.2
   implementations often skip the encoding; interop requires a config flag at the
   HTTP client layer, not in the type model.
+- **Lenient header parsing: try-Base64-first is ambiguous but unavoidable.** For
+  server-side compat with mixed 2.1.1/2.2/2.2.1 peers, try Base64-decode first;
+  if that yields valid UTF-8, use the decoded result. Otherwise treat the raw
+  tail as a plaintext token. Document the caveat: raw tokens that are
+  coincidentally valid Base64 will be decoded incorrectly. Expose as two separate
+  functions (`from_header_value` strict vs `from_header_value_lenient`) so call
+  sites are self-documenting.
 - **`base64 0.22` is already a transitive dep** (comes in via reqwest). Promoting
   it to a direct workspace dep does NOT add a new package to Cargo.lock and does
   not require a `needs-human` for the dep itself, but touching workspace
