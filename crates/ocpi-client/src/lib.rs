@@ -15,10 +15,21 @@ pub use error::ClientError;
 
 use ocpi_types::{
     v2_2_1::Credentials,
-    version::{Version, VersionDetails},
+    version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
 use url::Url;
+
+/// Select the best common version from `remote` given `supported` local versions.
+///
+/// Picks the entry with the highest [`VersionNumber`] that also appears in
+/// `supported`, or `None` if there is no overlap.
+fn select_version<'a>(remote: &'a [Version], supported: &[VersionNumber]) -> Option<&'a Version> {
+    remote
+        .iter()
+        .filter(|v| supported.contains(&v.version))
+        .max_by_key(|v| v.version)
+}
 
 /// A configured OCPI client pointed at one remote party's API base URL.
 ///
@@ -165,6 +176,28 @@ impl OcpiClient {
         envelope.data.ok_or(ClientError::EmptyData)
     }
 
+    /// Perform the two-step OCPI version bootstrap.
+    ///
+    /// 1. `GET /versions` — fetch the remote party's supported versions.
+    /// 2. Intersect with `supported` (this party's versions); pick the highest.
+    /// 3. `GET <version-url>` — return the selected version's [`VersionDetails`].
+    ///
+    /// Version priority (highest wins): `V2_3_0 > V2_2_1 > V2_2 > V2_1_1 > V2_0`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NoMutualVersion`] if no version is supported by both parties.
+    /// - [`ClientError::Http`] if a request fails.
+    /// - [`ClientError::EmptyData`] if a response envelope carries no data.
+    pub async fn negotiate_version(
+        &self,
+        supported: &[VersionNumber],
+    ) -> Result<VersionDetails, ClientError> {
+        let remote = self.versions().await?;
+        let best = select_version(&remote, supported).ok_or(ClientError::NoMutualVersion)?;
+        self.version_details(best.url.as_str()).await
+    }
+
     /// Unregister from the remote party (`DELETE <url>`).
     ///
     /// On success, both parties must stop automated communication.
@@ -187,8 +220,111 @@ impl OcpiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::OcpiClient;
+    use super::{select_version, OcpiClient};
+    use ocpi_types::{
+        common::Url as OcpiUrl,
+        version::{Version, VersionNumber},
+    };
     use url::Url;
+
+    fn make_version(v: VersionNumber, url: &str) -> Version {
+        Version {
+            version: v,
+            url: OcpiUrl::try_from(url).unwrap(),
+        }
+    }
+
+    // ── select_version ────────────────────────────────────────────────────────
+
+    #[test]
+    fn select_version_picks_highest_common() {
+        let remote = vec![
+            make_version(VersionNumber::V2_1_1, "https://example.com/2.1.1"),
+            make_version(VersionNumber::V2_2_1, "https://example.com/2.2.1"),
+        ];
+        let supported = [VersionNumber::V2_1_1, VersionNumber::V2_2_1];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2_1);
+    }
+
+    #[test]
+    fn select_version_no_overlap_returns_none() {
+        let remote = vec![make_version(VersionNumber::V2_0, "https://example.com/2.0")];
+        let supported = [VersionNumber::V2_2_1, VersionNumber::V2_3_0];
+        assert!(select_version(&remote, &supported).is_none());
+    }
+
+    #[test]
+    fn select_version_single_overlap() {
+        let remote = vec![
+            make_version(VersionNumber::V2_0, "https://example.com/2.0"),
+            make_version(VersionNumber::V2_2_1, "https://example.com/2.2.1"),
+        ];
+        let supported = [VersionNumber::V2_2_1];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2_1);
+    }
+
+    #[test]
+    fn select_version_remote_subset_of_supported() {
+        // Remote only supports older versions; we pick the highest the remote has.
+        let remote = vec![
+            make_version(VersionNumber::V2_1_1, "https://example.com/2.1.1"),
+            make_version(VersionNumber::V2_2, "https://example.com/2.2"),
+        ];
+        let supported = [
+            VersionNumber::V2_1_1,
+            VersionNumber::V2_2,
+            VersionNumber::V2_2_1,
+            VersionNumber::V2_3_0,
+        ];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2);
+    }
+
+    #[test]
+    fn select_version_empty_remote_returns_none() {
+        assert!(select_version(&[], &[VersionNumber::V2_2_1]).is_none());
+    }
+
+    #[test]
+    fn select_version_single_both_sides() {
+        let remote = vec![make_version(
+            VersionNumber::V2_3_0,
+            "https://example.com/2.3.0",
+        )];
+        let supported = [VersionNumber::V2_3_0];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_3_0);
+        assert_eq!(picked.url.as_str(), "https://example.com/2.3.0");
+    }
+
+    // ── VersionNumber ordering ────────────────────────────────────────────────
+
+    #[test]
+    fn version_number_ord_ascending() {
+        assert!(VersionNumber::V2_0 < VersionNumber::V2_1_1);
+        assert!(VersionNumber::V2_1_1 < VersionNumber::V2_2);
+        assert!(VersionNumber::V2_2 < VersionNumber::V2_2_1);
+        assert!(VersionNumber::V2_2_1 < VersionNumber::V2_3_0);
+    }
+
+    #[test]
+    fn version_number_max_is_v2_3_0() {
+        let versions = [
+            VersionNumber::V2_0,
+            VersionNumber::V2_1_1,
+            VersionNumber::V2_2,
+            VersionNumber::V2_2_1,
+            VersionNumber::V2_3_0,
+        ];
+        assert_eq!(
+            versions.iter().copied().max().unwrap(),
+            VersionNumber::V2_3_0
+        );
+    }
+
+    // ── OcpiClient ────────────────────────────────────────────────────────────
 
     #[test]
     fn builds_client_with_base_url() {
