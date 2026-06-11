@@ -5,6 +5,31 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 (run 3) — M1: common data types — Price, EnergyMix, GeoLocation/DisplayText validation (issue #7)
+
+- **Issue:** #7 — M1: Expand common data types (Price, EnergyMix, Tariff primitives)
+- **Branch:** `claude/amazing-shannon-tr85pl`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (117 tests, +21 new) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - `Price` struct: `excl_vat: f64`, `incl_vat: Option<f64>` — per `types.asciidoc`
+  - `EnergySourceCategory` enum (8 variants: NUCLEAR, GENERAL_FOSSIL, COAL, GAS, GENERAL_GREEN, SOLAR, WIND, WATER)
+  - `EnergySource` struct: `source: EnergySourceCategory`, `percentage: f64`
+  - `EnvironmentalImpactCategory` enum (NUCLEAR_WASTE, CARBON_DIOXIDE)
+  - `EnvironmentalImpact` struct: `category`, `amount: f64`
+  - `EnergyMix` struct with optional Vec arrays (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`)
+  - `GeoLocation::validate()` — latitude/longitude regex check without external deps
+  - `DisplayText::validate()` — language ≤2 chars, text ≤512 chars
+  - All new types re-exported from `ocpi-types` crate root
+  - 21 new tests: roundtrips, SCREAMING_SNAKE_CASE serde, validate edge cases
+- **No Cargo.toml changes.** (No `needs-human` flag.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) still open, `needs-human`. CI ✅, no review comments.
+- **f64 / Eq note:** `Price`, `EnergySource`, `EnvironmentalImpact`, and `EnergyMix` only derive `PartialEq` (not `Eq`) because `f64: !Eq`. Pure enum/string types keep full `Eq + Hash`.
+- **GeoLocation validation implementation:** manual coordinate check (`is_valid_coord` private helper) rather than pulling in the `regex` crate — keeps zero new deps.
+- **Next:** #23 (M2 end-to-end smoke test) — still blocked on #24 merging. Alternatively start M3 (Locations module) grooming if #24 stays open; #12/#13 (CI/security .github/ touches → `needs-human`) are also viable picks.
+
+---
+
 ## 2026-06-11 (run 2) — M1: Authorization header Base64-encode (issue #17)
 
 - **Issue:** #17 — M1: `ocpi-client` Authorization header — Base64-encode token per OCPI 2.2.1 spec

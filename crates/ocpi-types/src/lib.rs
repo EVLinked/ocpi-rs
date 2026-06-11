@@ -43,7 +43,11 @@ pub mod v2_1_1;
 pub mod v2_2_1;
 pub mod v2_3_0;
 
-pub use common::{CiString, CiString2, CiString255, CiString3, CiString36, Role, Url};
+pub use common::{
+    CiString, CiString2, CiString255, CiString3, CiString36, DisplayText, EnergyMix, EnergySource,
+    EnergySourceCategory, EnvironmentalImpact, EnvironmentalImpactCategory, GeoLocation, Price,
+    Role, Url,
+};
 pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
