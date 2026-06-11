@@ -5,6 +5,24 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 (run 4) — M3: Locations data types (issue #28)
+
+- **Issue:** #28 — M3: Locations data types — Location, EVSE, Connector, supporting enums
+- **Branch:** `claude/amazing-shannon-7fc885`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (128 tests, +11 new) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - **Enums** in `ocpi-types::v2_2_1`: `TokenType` (4 variants, forward ref for Tokens module), `Status` (9), `Capability` (13), `ConnectorFormat` (2), `ConnectorType` (43, mixed-case via explicit `#[serde(rename)]`), `Facility` (20), `ImageCategory` (7), `ParkingRestriction` (5), `ParkingType` (6), `PowerType` (5)
+  - **Structs**: `AdditionalGeoLocation`, `RegularHours`, `ExceptionalPeriod`, `Hours`, `StatusSchedule`, `PublishTokenType`, `Connector`, `Evse`, `Location`
+  - All re-exported from `ocpi-types` crate root
+  - `chrono::DateTime<Utc>` for `last_updated` / `period_begin` / `period_end` fields (chrono already a direct dep)
+  - 11 new tests covering serde roundtrips, mixed-case serialization, optional field omission
+- **LOC note:** 845 insertions; roughly half is mandatory `///` doc comments required by `#![warn(missing_docs)]`. Coherent, complete slice.
+- **No Cargo.toml changes.** (No `needs-human` flag.)
+- **Next:** #29 (M3: Locations server handler + axum `locations_router()`, P1) then #30 (client methods, P2).
+
+---
+
 ## 2026-06-11 (run 3) — M1: common data types — Price, EnergyMix, GeoLocation/DisplayText validation (issue #7)
 
 - **Issue:** #7 — M1: Expand common data types (Price, EnergyMix, Tariff primitives)

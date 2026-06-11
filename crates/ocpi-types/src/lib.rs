@@ -51,4 +51,10 @@ pub use common::{
 pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
+pub use v2_2_1::{
+    AdditionalGeoLocation, Capability, Connector, ConnectorFormat, ConnectorType, Credentials,
+    CredentialsRole, Evse, ExceptionalPeriod, Facility, Hours, ImageCategory, Location,
+    ParkingRestriction, ParkingType, PowerType, PublishTokenType, RegularHours, Status,
+    StatusSchedule, TokenType,
+};
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
