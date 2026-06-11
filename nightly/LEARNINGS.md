@@ -78,3 +78,5 @@ cycle. Keep entries short and specific. Prune contradictions.
   Use `ok_or(T)` for simple enum variants.
 - **Clippy `unnecessary_get_then_check`** — `map.get(k).is_none()` should be
   `!map.contains_key(k)`; `map.get(k).is_some()` should be `map.contains_key(k)`.
+- **`#[derive(PartialOrd, Ord)]` on enums works correctly when variants are declared in the intended ordering.** Rust's auto-derived `Ord` assigns discriminants 0, 1, 2, … in declaration order. For `VersionNumber`, declaring variants `V2_0, V2_1_1, V2_2, V2_2_1, V2_3_0` means older < newer automatically. Verify declaration order before adding `Ord` to any domain enum.
+- **Extract pure helpers for async methods that have non-trivial selection logic.** `select_version(remote, supported) -> Option<&Version>` is a synchronous pure function despite `negotiate_version` being async. Testing the selection logic directly (no HTTP mocking) makes the test suite faster and more targeted.
