@@ -5,6 +5,28 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 — M2 credentials axum router (issue #22)
+
+- **Issue:** #22 — M2: credentials axum router — `credentials_router()` with concrete `CredentialsConfig`
+- **Branch:** `nightly/2026-06-11-issue-22`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (93 tests) `deny check` ✅
+- **What shipped:**
+  - `ocpi-types::envelope` — new `OcpiResponse::success_empty()` constructor (returns `status_code=1000`, no data, no timestamp dep in ocpi-server)
+  - `ocpi-server` — `CredentialsConfig` struct: `own_credentials` (public), `registered: RwLock<HashMap<String, Credentials>>` (private), with `new()`, `is_registered()`, `register()`, `update()`, `delete()` methods; `Debug` impl
+  - `ocpi-server::http` — `credentials_router(Arc<CredentialsConfig>) -> Router` (GET/POST/PUT/DELETE /credentials); token extraction via `CredentialToken::from_header_value()`; 401 for bad/missing/unregistered token; 405 for AlreadyRegistered/NotRegistered; 200 + OCPI envelope otherwise
+  - 16 new unit + axum integration tests (8 unit, 8 http)
+- **Cargo.toml change:** added `tower`, `tokio`, `serde_json` as dev-deps to `ocpi-server` (all already in Cargo.lock via axum; no new packages). PR labeled `needs-human`; no auto-merge.
+- **Design choices:**
+  - `CredentialsConfig` does NOT implement `CredentialsHandler` (avoids async_fn_in_trait + axum Send issue; same pattern as VersionsConfig)
+  - GET /credentials requires the token to be in the registered map (Unauthorized if not; callers must POST first)
+  - All success paths return `own_credentials`; DELETE returns `success_empty()` (no data)
+  - The "fetch-back" step (server calls client's /versions during POST) is deferred to a follow-up issue per spec
+- **Deferred:** the initial pre-shared token validation concept (who is "allowed" to POST before registration) is open; current impl accepts any unrecognized token as a fresh registration request
+- **Next:** #19 (M2: version negotiation helper, P1) completes M2. After that, groom M3 issues.
+
+---
+
 ## 2026-06-10 — M2 credentials handshake types + trait (issue #10)
 
 - **Issue:** #10 — M2: Credentials handshake (POST/PUT/DELETE /credentials)

@@ -201,6 +201,105 @@ pub trait CredentialsHandler {
     async fn delete_credentials(&self, token: &str) -> Result<(), ServerError>;
 }
 
+// ── CredentialsConfig ─────────────────────────────────────────────────────────
+
+/// An in-memory credentials store for use with [`http::credentials_router`].
+///
+/// Holds the server's own [`Credentials`] and a token-keyed registry of
+/// registered parties. Thread-safe via interior mutability (`RwLock`); wrap
+/// in `Arc` to share across axum handlers.
+///
+/// `CredentialsConfig` intentionally does **not** implement
+/// [`CredentialsHandler`] — wiring that trait generically through axum runs
+/// into `async_fn_in_trait` / `Send` bound issues. Use this concrete type with
+/// [`http::credentials_router`] instead, and keep the trait for custom
+/// out-of-process implementations.
+pub struct CredentialsConfig {
+    /// The credentials this server returns on every successful request.
+    pub own_credentials: Credentials,
+    registered: std::sync::RwLock<std::collections::HashMap<String, Credentials>>,
+}
+
+impl std::fmt::Debug for CredentialsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialsConfig")
+            .field("own_credentials", &self.own_credentials)
+            .field(
+                "registered_count",
+                &self.registered.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl CredentialsConfig {
+    /// Create a new registry with the given server credentials.
+    ///
+    /// No parties are registered initially. Call
+    /// [`register`](Self::register) or let parties register via the axum
+    /// router.
+    #[must_use]
+    pub fn new(own_credentials: Credentials) -> Self {
+        Self {
+            own_credentials,
+            registered: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Returns `true` if `token` belongs to a registered party.
+    #[must_use]
+    pub fn is_registered(&self, token: &str) -> bool {
+        self.registered
+            .read()
+            .expect("lock not poisoned")
+            .contains_key(token)
+    }
+
+    /// Register a new party under `token`, storing their [`Credentials`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::AlreadyRegistered`] if `token` is already known.
+    pub fn register(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if map.contains_key(token) {
+            return Err(ServerError::AlreadyRegistered);
+        }
+        map.insert(token.to_owned(), credentials);
+        Ok(())
+    }
+
+    /// Update the stored credentials for an already-registered party.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotRegistered`] if `token` is not in the
+    /// registry.
+    pub fn update(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if !map.contains_key(token) {
+            return Err(ServerError::NotRegistered);
+        }
+        map.insert(token.to_owned(), credentials);
+        Ok(())
+    }
+
+    /// Remove the registration for `token`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotRegistered`] if `token` is not in the
+    /// registry.
+    pub fn delete(&self, token: &str) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if !map.contains_key(token) {
+            return Err(ServerError::NotRegistered);
+        }
+        map.remove(token);
+        Ok(())
+    }
+}
+
 // ── axum integration ──────────────────────────────────────────────────────────
 
 #[cfg(feature = "axum")]
@@ -211,17 +310,22 @@ pub mod http {
 
     use axum::{
         extract::{Path, State},
+        http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
         routing::get,
         Json, Router,
     };
     use ocpi_types::{
         envelope::OcpiResponse,
+        transport::CredentialToken,
+        v2_2_1::Credentials,
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
-    use crate::VersionsConfig;
+    use crate::{CredentialsConfig, ServerError, VersionsConfig};
+
+    // ── Versions ──────────────────────────────────────────────────────────────
 
     /// Build an axum router exposing `GET /versions` and `GET /versions/{version}`.
     ///
@@ -259,6 +363,127 @@ pub mod http {
                 format!("version {version_str} not supported"),
             ))
             .into_response(),
+        }
+    }
+
+    // ── Credentials ───────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI credentials endpoints.
+    ///
+    /// Exposes:
+    /// - `GET    /credentials` — return this server's own credentials
+    /// - `POST   /credentials` — register a new party; HTTP 405 if already registered
+    /// - `PUT    /credentials` — update an existing registration; HTTP 405 if not registered
+    /// - `DELETE /credentials` — revoke a registration; HTTP 405 if not registered
+    ///
+    /// All routes validate the `Authorization: Token <base64>` header.
+    /// Pass an `Arc<`[`CredentialsConfig`]`>` so the same store can be shared
+    /// with other handlers or inspected by the host application.
+    pub fn credentials_router(config: Arc<CredentialsConfig>) -> Router {
+        Router::new()
+            .route(
+                "/credentials",
+                get(handle_get)
+                    .post(handle_post)
+                    .put(handle_put)
+                    .delete(handle_delete),
+            )
+            .with_state(config)
+    }
+
+    /// Extract and decode the Bearer token from `Authorization: Token <base64>`.
+    fn extract_token(headers: &HeaderMap) -> Option<String> {
+        let value = headers.get("Authorization")?.to_str().ok()?;
+        CredentialToken::from_header_value(value).map(|t| t.as_str().to_owned())
+    }
+
+    fn unauthorized_response() -> Response {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(OcpiResponse::<Credentials>::error(
+                OcpiStatusCode::ClientError,
+                "unauthorized",
+            )),
+        )
+            .into_response()
+    }
+
+    fn method_not_allowed_response(msg: &'static str) -> Response {
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(OcpiResponse::<Credentials>::error(
+                OcpiStatusCode::ClientError,
+                msg,
+            )),
+        )
+            .into_response()
+    }
+
+    fn server_error_response() -> Response {
+        Json(OcpiResponse::<Credentials>::error(
+            OcpiStatusCode::ServerError,
+            "internal server error",
+        ))
+        .into_response()
+    }
+
+    async fn handle_get(State(cfg): State<Arc<CredentialsConfig>>, headers: HeaderMap) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return unauthorized_response(),
+        };
+        if !cfg.is_registered(token.as_str()) {
+            return unauthorized_response();
+        }
+        Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response()
+    }
+
+    async fn handle_post(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+        Json(body): Json<Credentials>,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return unauthorized_response(),
+        };
+        match cfg.register(token.as_str(), body) {
+            Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
+            Err(ServerError::AlreadyRegistered) => {
+                method_not_allowed_response("already registered")
+            }
+            Err(_) => server_error_response(),
+        }
+    }
+
+    async fn handle_put(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+        Json(body): Json<Credentials>,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return unauthorized_response(),
+        };
+        match cfg.update(token.as_str(), body) {
+            Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
+            Err(ServerError::NotRegistered) => method_not_allowed_response("not registered"),
+            Err(_) => server_error_response(),
+        }
+    }
+
+    async fn handle_delete(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return unauthorized_response(),
+        };
+        match cfg.delete(token.as_str()) {
+            Ok(()) => Json(OcpiResponse::<Credentials>::success_empty()).into_response(),
+            Err(ServerError::NotRegistered) => method_not_allowed_response("not registered"),
+            Err(_) => server_error_response(),
         }
     }
 }
@@ -347,5 +572,261 @@ mod tests {
             OcpiStatusCode::UnsupportedVersion,
         ));
         assert_eq!(err.status_code(), OcpiStatusCode::UnsupportedVersion);
+    }
+
+    // ── CredentialsConfig ─────────────────────────────────────────────────────
+
+    fn make_credentials(token: &str) -> Credentials {
+        use ocpi_types::{
+            common::{BusinessDetails, CiString2, CiString3},
+            v2_2_1::CredentialsRole,
+            Role, Url,
+        };
+        Credentials {
+            token: token.to_owned(),
+            url: Url::try_from("https://example.com/ocpi/versions").unwrap(),
+            roles: vec![CredentialsRole {
+                role: Role::Cpo,
+                business_details: BusinessDetails {
+                    name: "Test CPO".into(),
+                    website: None,
+                    logo: None,
+                },
+                party_id: CiString3::try_from("EXA").unwrap(),
+                country_code: CiString2::try_from("NL").unwrap(),
+            }],
+        }
+    }
+
+    #[test]
+    fn credentials_config_new_is_empty() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        assert!(!cfg.is_registered("TOKEN_A"));
+    }
+
+    #[test]
+    fn credentials_config_register_and_lookup() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        let party = make_credentials("PARTY_TOKEN");
+        cfg.register("TOKEN_A", party.clone()).unwrap();
+        assert!(cfg.is_registered("TOKEN_A"));
+        assert!(!cfg.is_registered("TOKEN_B"));
+    }
+
+    #[test]
+    fn credentials_config_double_register_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        let err = cfg.register("TOKEN_A", make_credentials("P2")).unwrap_err();
+        assert!(matches!(err, ServerError::AlreadyRegistered));
+    }
+
+    #[test]
+    fn credentials_config_update_unknown_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        let err = cfg.update("UNKNOWN", make_credentials("P")).unwrap_err();
+        assert!(matches!(err, ServerError::NotRegistered));
+    }
+
+    #[test]
+    fn credentials_config_update_known_succeeds() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P1")).unwrap();
+        cfg.update("TOKEN_A", make_credentials("P2")).unwrap();
+        assert!(cfg.is_registered("TOKEN_A"));
+    }
+
+    #[test]
+    fn credentials_config_delete_unknown_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        let err = cfg.delete("UNKNOWN").unwrap_err();
+        assert!(matches!(err, ServerError::NotRegistered));
+    }
+
+    #[test]
+    fn credentials_config_delete_known_removes() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        cfg.delete("TOKEN_A").unwrap();
+        assert!(!cfg.is_registered("TOKEN_A"));
+    }
+
+    // ── axum credentials router ───────────────────────────────────────────────
+
+    #[cfg(feature = "axum")]
+    mod axum_credentials_tests {
+        use super::*;
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use ocpi_types::transport::CredentialToken;
+        use tower::ServiceExt as _;
+
+        fn server_config() -> std::sync::Arc<CredentialsConfig> {
+            std::sync::Arc::new(CredentialsConfig::new(make_credentials("SERVER_TOKEN")))
+        }
+
+        fn auth_header(raw_token: &str) -> String {
+            CredentialToken::new(raw_token).to_header_value()
+        }
+
+        fn party_json(token: &str) -> String {
+            serde_json::to_string(&make_credentials(token)).unwrap()
+        }
+
+        #[tokio::test]
+        async fn get_missing_token_is_401() {
+            let app = crate::http::credentials_router(server_config());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/credentials")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn get_unregistered_token_is_401() {
+            let app = crate::http::credentials_router(server_config());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("UNKNOWN"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn post_registers_and_returns_200() {
+            let cfg = server_config();
+            let app = crate::http::credentials_router(cfg.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(party_json("PARTY_TOKEN")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(cfg.is_registered("TOKEN_A"));
+        }
+
+        #[tokio::test]
+        async fn post_double_register_is_405() {
+            let cfg = server_config();
+            cfg.register("TOKEN_A", make_credentials("P1")).unwrap();
+            let app = crate::http::credentials_router(cfg);
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(party_json("P2")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn put_not_registered_is_405() {
+            let app = crate::http::credentials_router(server_config());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(party_json("P")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn delete_not_registered_is_405() {
+            let app = crate::http::credentials_router(server_config());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn delete_registered_returns_200_empty() {
+            let cfg = server_config();
+            cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+            let app = crate::http::credentials_router(cfg.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(!cfg.is_registered("TOKEN_A"));
+        }
+
+        #[tokio::test]
+        async fn get_registered_returns_own_credentials() {
+            let cfg = server_config();
+            cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+            let app = crate::http::credentials_router(cfg.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/credentials")
+                        .header("Authorization", auth_header("TOKEN_A"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let envelope: ocpi_types::OcpiResponse<ocpi_types::v2_2_1::Credentials> =
+                serde_json::from_slice(&body).unwrap();
+            assert!(envelope.is_success());
+            assert_eq!(envelope.data.unwrap().token, cfg.own_credentials.token);
+        }
     }
 }

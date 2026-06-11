@@ -53,6 +53,19 @@ impl<T> OcpiResponse<T> {
         }
     }
 
+    /// Build a successful response with no data payload (`status_code = 1000`, `data` absent).
+    ///
+    /// Use this for operations that succeed but return no resource (e.g. DELETE).
+    #[must_use]
+    pub fn success_empty() -> Self {
+        Self {
+            data: None,
+            status_code: OcpiStatusCode::Success,
+            status_message: None,
+            timestamp: Utc::now(),
+        }
+    }
+
     /// Build an error response with the given status code and message.
     #[must_use]
     pub fn error(code: OcpiStatusCode, message: impl Into<String>) -> Self {

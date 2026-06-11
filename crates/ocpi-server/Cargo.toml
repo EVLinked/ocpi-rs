@@ -20,3 +20,9 @@ axum = ["dep:axum"]
 ocpi-types.workspace = true
 thiserror.workspace = true
 axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+# tower is already a transitive dep via axum; promoted here for ServiceExt::oneshot in tests
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }

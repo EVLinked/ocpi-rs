@@ -681,7 +681,10 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "ocpi-types",
+ "serde_json",
  "thiserror",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

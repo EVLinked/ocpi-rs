@@ -78,3 +78,6 @@ cycle. Keep entries short and specific. Prune contradictions.
   Use `ok_or(T)` for simple enum variants.
 - **Clippy `unnecessary_get_then_check`** — `map.get(k).is_none()` should be
   `!map.contains_key(k)`; `map.get(k).is_some()` should be `map.contains_key(k)`.
+- **axum method routing on a single path** — use `.route("/path", get(a).post(b).put(c).delete(d))` to register multiple HTTP methods on the same URL. Do NOT import `routing::{post, put, delete}` — those are for separate `.route()` calls; importing them when unused triggers `unused-imports` under `-D warnings`.
+- **`tower` as dev-dep for axum tests** — `tower::ServiceExt::oneshot` requires `tower = { version = "0.5", features = ["util"] }` as an explicit dev-dep. tower 0.5.x is already in Cargo.lock as a transitive dep of axum, so no new packages are added; but the Cargo.toml change still triggers `needs-human`.
+- **`OcpiResponse::success_empty()`** — add this constructor to `ocpi-types::envelope` rather than reaching for chrono in ocpi-server. Since ocpi-server has no direct chrono dep, constructing `OcpiResponse` directly would require either adding chrono or working around it; the clean solution is a `success_empty()` on the type itself.
