@@ -5,6 +5,25 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 — M2 version negotiation helper (issue #19)
+
+- **Issue:** #19 — M2: `OcpiClient::negotiate_version` — select best shared OCPI version
+- **Branch:** `nightly/2026-06-11-issue-19`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (88 tests, +13 new) `deny check` ✅ (expected — no new deps)
+- **What shipped:**
+  - `ocpi-types::version::VersionNumber` — added `PartialOrd + Ord` derive (enum variants declared in ascending version order, so auto-derive is correct: V2_0 < V2_1_1 < V2_2 < V2_2_1 < V2_3_0)
+  - `ocpi-types::version` — 1 new test: `version_number_ord_ascending_order`
+  - `ocpi-client::error::ClientError::NoMutualVersion` — new variant with descriptive message; maps to OCPI `3002 UnsupportedVersion` conceptually
+  - `ocpi-client` — private `select_version(remote, supported) -> Option<&Version>` pure helper (no HTTP; easily testable); `OcpiClient::negotiate_version(&[VersionNumber]) -> Result<VersionDetails, ClientError>` async method
+  - 12 new tests in `ocpi-client`: 6 for `select_version`, 2 for `VersionNumber` ordering, 1 for `NoMutualVersion` display, 3 pre-existing client tests
+- **No Cargo.toml changes.** (No `needs-human` flag required.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) was already open with green CI; no fixing needed tonight.
+- **What worked:** Extracting `select_version` as a pure function kept the tests fast (no HTTP mocking needed), and `#[derive(PartialOrd, Ord)]` just worked because the enum variants are in the right declaration order.
+- **Next:** #23 (M2 end-to-end smoke test, P2) — depends on PR #24 merging first. While waiting, #17 (Authorization header Base64-encode, P2) or #7 (common data types: Price, EnergyMix). Suggest #17 — it unblocks correct interop for the entire M2 handshake.
+
+---
+
 ## 2026-06-10 — M2 credentials handshake types + trait (issue #10)
 
 - **Issue:** #10 — M2: Credentials handshake (POST/PUT/DELETE /credentials)

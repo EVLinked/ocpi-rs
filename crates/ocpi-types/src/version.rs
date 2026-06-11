@@ -18,7 +18,7 @@ use crate::OcpiError;
 // ── VersionNumber ─────────────────────────────────────────────────────────────
 
 /// An OCPI protocol version, serialized as its canonical dotted string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum VersionNumber {
     /// OCPI 2.0.
     #[serde(rename = "2.0")]
@@ -176,6 +176,14 @@ mod tests {
     use super::*;
 
     // ── VersionNumber ──
+
+    #[test]
+    fn version_number_ord_ascending_order() {
+        assert!(VersionNumber::V2_0 < VersionNumber::V2_1_1);
+        assert!(VersionNumber::V2_1_1 < VersionNumber::V2_2);
+        assert!(VersionNumber::V2_2 < VersionNumber::V2_2_1);
+        assert!(VersionNumber::V2_2_1 < VersionNumber::V2_3_0);
+    }
 
     #[test]
     fn version_number_serializes_as_dotted_string() {
