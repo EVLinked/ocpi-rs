@@ -5,6 +5,22 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 (run 5) — CI: calibrate MSRV to 1.85 (issue #12)
+
+- **Issue:** #12 — CI: calibrate or remove the MSRV (1.82) job
+- **Branch:** `claude/amazing-shannon-7fc885` (stacked onto run 4 / PR #31)
+- **PR:** #31 (updated — combined with #28; both close in same PR)
+- **CI:** `cargo check` ✅ (stable) `fmt` ✅ `clippy -D warnings` ✅
+- **Root cause confirmed:** `clap_lex 1.1.0` + `clap 4.6.x` declare `rust-version = "1.85"` and use Cargo edition 2024. Incompatible with Cargo 1.82. Failure was pre-existing on main before PR #31.
+- **What shipped:**
+  - `Cargo.toml` `[workspace.package] rust-version`: `"1.82"` → `"1.85"`
+  - `.github/workflows/ci.yml` msrv job: toolchain `1.82.0` → `1.85.0`, removed `continue-on-error: true` (now required check)
+- **needs-human:** YES — diff touches `.github/`; auto-merge disabled.
+- **Note on PR stacking:** branch `claude/amazing-shannon-7fc885` already had PR #31 open. GitHub forbids a second PR from the same branch to the same base, so commit 2 (#12) was appended to PR #31; description updated to close both #28 and #12.
+- **Next:** #29 (M3: Locations server handler + axum `locations_router()`, P1) after PR #31 merges.
+
+---
+
 ## 2026-06-11 (run 4) — M3: Locations data types (issue #28)
 
 - **Issue:** #28 — M3: Locations data types — Location, EVSE, Connector, supporting enums
