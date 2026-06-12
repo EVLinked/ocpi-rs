@@ -44,15 +44,16 @@ pub mod v2_2_1;
 pub mod v2_3_0;
 
 pub use common::{
-    CiString, CiString2, CiString255, CiString3, CiString36, DisplayText, EnergyMix, EnergySource,
-    EnergySourceCategory, EnvironmentalImpact, EnvironmentalImpactCategory, GeoLocation, Price,
-    Role, Url,
+    CiString, CiString2, CiString255, CiString3, CiString36, CiString39, CiString48, DisplayText,
+    EnergyMix, EnergySource, EnergySourceCategory, EnvironmentalImpact,
+    EnvironmentalImpactCategory, GeoLocation, Price, Role, Url,
 };
 pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use v2_2_1::{
-    AuthMethod, CdrDimension, CdrDimensionType, CdrToken, ChargingPeriod, ChargingPreferences,
-    ChargingPreferencesResponse, ProfileType, Session, SessionStatus, TokenType,
+    AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
+    ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat, ConnectorType, PowerType,
+    ProfileType, Session, SessionStatus, SignedData, SignedValue, Tariff, TokenType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
