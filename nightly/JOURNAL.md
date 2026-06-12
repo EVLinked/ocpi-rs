@@ -5,6 +5,32 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 — M4: CDR data types (issue #35)
+
+- **Issue:** #35 — M4: CDR data types — Cdr, CdrLocation, SignedData, SignedValue
+- **Branch:** `claude/sweet-hopper-6fvg0a`
+- **PR:** #39 (auto-merge eligible — no Cargo.toml changes)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (150 total: 126 ocpi-types, 16 client, 7 server, 1 doc; +14 new) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - `Cdr` struct — 14 required + 16 optional = 30 fields (country_code through last_updated); all optional fields use `#[serde(skip_serializing_if = "Option::is_none", default)]`; `tariffs: Vec<Tariff>` uses `#[serde(default, skip_serializing_if = "Vec::is_empty")]`
+  - `CdrLocation` struct — 14 fields; compact location snapshot embedded in each CDR
+  - `SignedData` + `SignedValue` — Eichrecht/OCMF signed metering data
+  - `ConnectorType` enum — 38 variants; forward reference for Locations module (PR #31 still pending human review). Variants with digits (`IEC_62196_T1`, `NEMA_5_20`, `IEC_60309_2_single_16`) use explicit `#[serde(rename)]` since SCREAMING_SNAKE_CASE does not insert `_` before digits
+  - `ConnectorFormat` enum — SOCKET, CABLE
+  - `PowerType` enum — 5 variants; all use explicit `#[serde(rename)]` for same digit-splitting reason (`AC_1_PHASE` etc.)
+  - `Tariff` — forward declaration (required scalar fields only; full types in M5-Tariffs; unknown fields silently ignored on deserialization)
+  - `CiString39` type alias (`common.rs`) — CDR IDs allow credit-CDR suffix
+  - `CiString48` type alias (`common.rs`) — eMI3 EVSE IDs
+  - All new types re-exported from `ocpi-types` crate root
+  - 14 new tests: serde correctness, spec-faithful JSON deserialization, optional field absence
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **`type` field pattern:** `SignedValue.signed_data: String` is a field name, not a type collision; Rust field and type namespaces are separate — no rename needed.
+- **PowerType digit lesson:** `Ac1Phase` → SCREAMING_SNAKE → `"AC1_PHASE"` (NOT `"AC_1_PHASE"`). Same issue as `IEC_62196_*` and `NEMA_*` in ConnectorType. Always add explicit `#[serde(rename)]` for any variant name that embeds a digit followed by a word boundary.
+- **Sync note:** PR #24 (needs-human), PR #31 (needs-human), PR #39 (this run, auto-merge eligible). 2 human-gated PRs remain open; within the ≤2 nightly-PR budget.
+- **Next:** #29 (M3: Locations server handler) — depends on PR #31 merging. If PR #31 merges, ConnectorType/Format/PowerType defined here should be removed and re-exported from there (deduplication). Alternatively groom next available `nightly`-labeled issue.
+
+---
+
 ## 2026-06-12 — M4: Sessions data types + shared CDR primitives (issue #34)
 
 - **Issue:** #34 — M4: Sessions data types — Session, ChargingPreferences, shared ChargingPeriod/CdrDimension types
