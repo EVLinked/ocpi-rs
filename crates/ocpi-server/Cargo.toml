@@ -19,4 +19,10 @@ axum = ["dep:axum"]
 [dependencies]
 ocpi-types.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
 axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -5,6 +5,29 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 7) — M3: Locations server handler trait + axum `locations_router()` (issue #29)
+
+- **Issue:** #29 — M3: Locations server handler trait + axum `locations_router()`
+- **Branch:** `claude/amazing-shannon-srbbhl` (based on `claude/amazing-shannon-7fc885` which contains Location types from #28)
+- **PR:** NOT opened tonight — at 2-nightly-PR limit (PRs #31 and #24 both open, both `needs-human`). Code is ready; PR will be opened once #31 merges.
+- **CI:** Local: `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (135 tests, +8 new) `deny check` skipped (no new packages in Cargo.lock)
+- **What shipped:**
+  - `OcpiResponse::success_empty()` added to `ocpi-types::envelope` (needed by PUT/PATCH handlers)
+  - `ServerError::NotFound` + `ServerError::InvalidPatch(String)` variants added
+  - `LocationsHandler` trait: 10 async methods covering full receiver interface (list, get/put/patch Location/EVSE/Connector)
+  - `LocationsConfig` in-memory store: `RwLock<HashMap<(cc, pid, lid), Location>>`, thread-safe, `Default + Debug`
+  - `json_merge_patch()` private helper (RFC 7396) for PATCH operations
+  - `http::locations_router(Arc<LocationsConfig>) -> Router` — 10 axum routes following spec URL pattern `/{cc}/{pid}/...`
+  - Pagination headers `X-Total-Count` + `X-Limit` on list endpoint
+  - 8 new tests covering: put/get round-trip, not-found, list pagination, CPO filtering, patch, merge-patch null removal
+- **Cargo.toml changes:** `ocpi-server` added direct deps: `serde`, `serde_json`, `chrono` (all workspace, all already in Cargo.lock); `tokio` as dev-dep. Triggers `needs-human` on the eventual PR.
+- **Known gaps:** `Link: next` header (requires deployment base URL knowledge — deferred); date-range filtering on list endpoint (deferred); auth token validation on locations routes (no token check in this PR — relies on middleware or the credentials router upstream).
+- **Sync note:** PR #31 (issue #28 Locations types + MSRV) has all CI green, `needs-human`. PR #24 (issue #22 credentials axum router) has msrv(1.82) failing (non-blocking; will clear once #31 merges and #24 rebases). Neither has review comments.
+- **What worked:** Following the `CredentialsConfig` + `credentials_router` pattern exactly. The `RwLock<HashMap<key_tuple, Location>>` is clean and the EVSE/Connector mutations (find-by-uid, replace in place) are straightforward.
+- **Next:** Once PR #31 merges: open tonight's PR for #29. Then pick up #30 (Locations client methods, P2) or #23 (M2 smoke test if #24 also merges).
+
+---
+
 ## 2026-06-12 (run 6) — fix: MSRV bump 1.85 → 1.86 (icu_* v2.2.0 CI failure on PR #31)
 
 - **Issue:** CI follow-up — PR #31 `msrv (1.85)` check failed because `icu_collections/icu_locale_core/icu_normalizer/icu_properties/icu_provider/idna_adapter v2.2.0` all declare `rust-version = "1.86"`. Run 5 set MSRV to 1.85 but that was still one short.
