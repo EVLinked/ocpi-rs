@@ -53,8 +53,10 @@ pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use v2_2_1::{
     AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
-    ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat, ConnectorType, PowerType,
-    ProfileType, Session, SessionStatus, SignedData, SignedValue, Tariff, TokenType,
+    ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat, ConnectorType, DayOfWeek,
+    PowerType, PriceComponent, ProfileType, ReservationRestrictionType, Session, SessionStatus,
+    SignedData, SignedValue, Tariff, TariffDimensionType, TariffElement, TariffRestrictions,
+    TariffType, TokenType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
 
