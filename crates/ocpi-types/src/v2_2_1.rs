@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     BusinessDetails, CiString, CiString2, CiString3, CiString36, CiString39, CiString48,
-    GeoLocation, Price, Role, Url,
+    DisplayText, EnergyMix, GeoLocation, Price, Role, Url,
 };
 use crate::OcpiError;
 
@@ -593,13 +593,162 @@ pub struct SignedData {
     pub url: Option<String>,
 }
 
-// ── Tariff (forward declaration) ──────────────────────────────────────────────
+// ── Tariffs module ────────────────────────────────────────────────────────────
+//
+// Spec: specs/ocpi/2.2.1/mod_tariffs.asciidoc — §Object description + §Data types
 
-/// Tariff object — forward declaration pending M5-Tariffs.
+/// The optional tariff type, used to distinguish tariffs for specific use-cases.
 ///
-/// Contains only the always-required scalar fields. Optional fields and the
-/// `elements` array will be modeled when the Tariffs module is implemented.
-/// Unknown fields are silently ignored during deserialization.
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — TariffType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TariffType {
+    /// Used to describe that a tariff is valid when ad-hoc payment is used at the charge point.
+    AdHocPayment,
+    /// Used to describe that a tariff is valid when Charging Preference: CHEAP is set for the session.
+    ProfileCheap,
+    /// Used to describe that a tariff is valid when Charging Preference: FAST is set for the session.
+    ProfileFast,
+    /// Used to describe that a tariff is valid when Charging Preference: GREEN is set for the session.
+    ProfileGreen,
+    /// Used to describe that a tariff is valid for a regular charging session.
+    Regular,
+}
+
+/// Dimension used for a price component.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — TariffDimensionType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TariffDimensionType {
+    /// Defined in kWh, step_size multiplier: 1 Wh.
+    Energy,
+    /// Flat fee, no unit.
+    Flat,
+    /// Time not charging: defined in hours, step_size multiplier: 1 second.
+    ParkingTime,
+    /// Time charging: defined in hours, step_size multiplier: 1 second.
+    Time,
+}
+
+/// Day of week for tariff restrictions.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — DayOfWeek enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DayOfWeek {
+    /// Monday.
+    Monday,
+    /// Tuesday.
+    Tuesday,
+    /// Wednesday.
+    Wednesday,
+    /// Thursday.
+    Thursday,
+    /// Friday.
+    Friday,
+    /// Saturday.
+    Saturday,
+    /// Sunday.
+    Sunday,
+}
+
+/// Type of restriction applicable to a reservation.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — ReservationRestrictionType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReservationRestrictionType {
+    /// Used in TariffElements to define the price of a reservation.
+    Reservation,
+    /// Used in TariffElements to define the price of a reservation that expires (i.e. driver does not start charging).
+    ReservationExpires,
+}
+
+/// Restrictions that limit when a `TariffElement` applies.
+///
+/// All fields are optional. When a field is `None` the corresponding dimension
+/// is unrestricted. Ranges are inclusive on both ends.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — TariffRestrictions class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TariffRestrictions {
+    /// Start time of day in local time, applies every day, format: `HH:MM` (24h).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start_time: Option<String>,
+    /// End time of day in local time, applies every day, format: `HH:MM` (24h).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub end_time: Option<String>,
+    /// Start date, applies from this day (inclusive), format: `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start_date: Option<String>,
+    /// End date, applies until this day (inclusive), format: `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub end_date: Option<String>,
+    /// Minimum consumed energy (kWh) — inclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_kwh: Option<f64>,
+    /// Maximum consumed energy (kWh) — exclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_kwh: Option<f64>,
+    /// Minimum current (A) over the entire charging session — inclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_current: Option<f64>,
+    /// Maximum current (A) over the entire charging session — exclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_current: Option<f64>,
+    /// Minimum power (kW) over the entire charging session — inclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_power: Option<f64>,
+    /// Maximum power (kW) over the entire charging session — exclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_power: Option<f64>,
+    /// Minimum duration (seconds) of the charging session — inclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_duration: Option<u32>,
+    /// Maximum duration (seconds) of the charging session — exclusive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_duration: Option<u32>,
+    /// Applicable days of the week.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub day_of_week: Vec<DayOfWeek>,
+    /// Restriction on charging or parking reservation.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reservation: Option<ReservationRestrictionType>,
+}
+
+/// A single dimension component of a tariff element.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — PriceComponent class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceComponent {
+    /// The dimension that this component applies to.
+    ///
+    /// Field renamed from spec `type` (Rust keyword).
+    #[serde(rename = "type")]
+    pub component_type: TariffDimensionType,
+    /// Price per unit (excl. VAT) for this component.
+    pub price: f64,
+    /// Applicable VAT percentage for this tariff dimension. If omitted, no VAT applies.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vat: Option<f64>,
+    /// Minimum amount to be billed. Unit depends on the `component_type`.
+    pub step_size: u32,
+}
+
+/// A set of price components that apply under an optional set of restrictions.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — TariffElement class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TariffElement {
+    /// List of price components that make up the pricing of this tariff.
+    pub price_components: Vec<PriceComponent>,
+    /// Optional restrictions that this element may not be used with.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub restrictions: Option<TariffRestrictions>,
+}
+
+/// An OCPI Tariff object. Describes a pricing scheme for EV charging sessions.
 ///
 /// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — Tariff object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -612,6 +761,37 @@ pub struct Tariff {
     pub id: CiString36,
     /// ISO 4217 currency code.
     pub currency: String,
+    /// The optional tariff type. When absent this tariff can be used for all sessions.
+    ///
+    /// Field renamed from spec `type` (Rust keyword).
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none", default)]
+    pub tariff_type: Option<TariffType>,
+    /// Human-readable name(s) or description(s) in various languages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tariff_alt_text: Vec<DisplayText>,
+    /// Alternative URL to a tariff information web page.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tariff_alt_url: Option<Url>,
+    /// Minimum charging price (excl. VAT). When set, the sum of the billed price components
+    /// will never be lower than this price.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_price: Option<Price>,
+    /// Maximum charging price (excl. VAT). When set, the sum of the billed price components
+    /// will never exceed this price.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_price: Option<Price>,
+    /// List of tariff elements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<TariffElement>,
+    /// When this tariff becomes active.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start_date_time: Option<DateTime<Utc>>,
+    /// When this tariff becomes inactive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub end_date_time: Option<DateTime<Utc>>,
+    /// Details on the energy supplied with this tariff.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub energy_mix: Option<EnergyMix>,
     /// Timestamp of the last update (or creation) of this tariff.
     pub last_updated: DateTime<Utc>,
 }
@@ -1578,5 +1758,228 @@ mod tests {
         assert!((cdr.total_energy - 120.0).abs() < f64::EPSILON);
         assert!(cdr.credit.is_none());
         assert!(cdr.tariffs.is_empty());
+    }
+
+    // ── Tariff tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn tariff_type_serde_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&TariffType::AdHocPayment).unwrap(),
+            "\"AD_HOC_PAYMENT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TariffType::Regular).unwrap(),
+            "\"REGULAR\""
+        );
+        assert_eq!(
+            serde_json::from_str::<TariffType>("\"PROFILE_CHEAP\"").unwrap(),
+            TariffType::ProfileCheap
+        );
+    }
+
+    #[test]
+    fn tariff_dimension_type_serde() {
+        assert_eq!(
+            serde_json::to_string(&TariffDimensionType::Energy).unwrap(),
+            "\"ENERGY\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TariffDimensionType::ParkingTime).unwrap(),
+            "\"PARKING_TIME\""
+        );
+        let t: TariffDimensionType = serde_json::from_str("\"FLAT\"").unwrap();
+        assert_eq!(t, TariffDimensionType::Flat);
+    }
+
+    #[test]
+    fn day_of_week_serde() {
+        assert_eq!(
+            serde_json::to_string(&DayOfWeek::Monday).unwrap(),
+            "\"MONDAY\""
+        );
+        assert_eq!(
+            serde_json::from_str::<DayOfWeek>("\"SATURDAY\"").unwrap(),
+            DayOfWeek::Saturday
+        );
+    }
+
+    #[test]
+    fn reservation_restriction_type_serde() {
+        assert_eq!(
+            serde_json::to_string(&ReservationRestrictionType::ReservationExpires).unwrap(),
+            "\"RESERVATION_EXPIRES\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ReservationRestrictionType>("\"RESERVATION\"").unwrap(),
+            ReservationRestrictionType::Reservation
+        );
+    }
+
+    #[test]
+    fn price_component_type_field_renamed() {
+        let pc = PriceComponent {
+            component_type: TariffDimensionType::Energy,
+            price: 0.25,
+            vat: Some(21.0),
+            step_size: 1,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        assert!(
+            json.contains("\"type\":\"ENERGY\""),
+            "wire name must be 'type': {json}"
+        );
+        assert!(
+            !json.contains("component_type"),
+            "Rust field name must not appear: {json}"
+        );
+
+        let back: PriceComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.component_type, TariffDimensionType::Energy);
+        assert!((back.price - 0.25).abs() < f64::EPSILON);
+        assert_eq!(back.step_size, 1);
+    }
+
+    #[test]
+    fn price_component_vat_omitted_when_none() {
+        let pc = PriceComponent {
+            component_type: TariffDimensionType::Flat,
+            price: 1.00,
+            vat: None,
+            step_size: 1,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        assert!(
+            !json.contains("vat"),
+            "vat must be omitted when None: {json}"
+        );
+    }
+
+    #[test]
+    fn tariff_element_roundtrip() {
+        let te = TariffElement {
+            price_components: vec![PriceComponent {
+                component_type: TariffDimensionType::Time,
+                price: 2.00,
+                vat: None,
+                step_size: 300,
+            }],
+            restrictions: Some(TariffRestrictions {
+                day_of_week: vec![DayOfWeek::Monday, DayOfWeek::Tuesday],
+                min_duration: Some(1800),
+                ..TariffRestrictions::default()
+            }),
+        };
+        let json = serde_json::to_string(&te).unwrap();
+        let back: TariffElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(te, back);
+    }
+
+    #[test]
+    fn tariff_restrictions_empty_omits_fields() {
+        let tr = TariffRestrictions::default();
+        let json = serde_json::to_string(&tr).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn tariff_type_field_renamed_and_optional() {
+        let t = Tariff {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("ALL").unwrap(),
+            id: CiString36::try_from("12").unwrap(),
+            currency: "EUR".to_string(),
+            tariff_type: Some(TariffType::Regular),
+            tariff_alt_text: vec![],
+            tariff_alt_url: None,
+            min_price: None,
+            max_price: None,
+            elements: vec![TariffElement {
+                price_components: vec![PriceComponent {
+                    component_type: TariffDimensionType::Energy,
+                    price: 0.30,
+                    vat: None,
+                    step_size: 1,
+                }],
+                restrictions: None,
+            }],
+            start_date_time: None,
+            end_date_time: None,
+            energy_mix: None,
+            last_updated: "2019-01-14T08:00:00Z".parse().unwrap(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(
+            json.contains("\"type\":\"REGULAR\""),
+            "wire name must be 'type': {json}"
+        );
+        assert!(
+            !json.contains("tariff_type"),
+            "Rust field must not appear: {json}"
+        );
+
+        let back: Tariff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tariff_type, Some(TariffType::Regular));
+    }
+
+    #[test]
+    fn tariff_type_omitted_when_none() {
+        let t = Tariff {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("ALL").unwrap(),
+            id: CiString36::try_from("12").unwrap(),
+            currency: "EUR".to_string(),
+            tariff_type: None,
+            tariff_alt_text: vec![],
+            tariff_alt_url: None,
+            min_price: None,
+            max_price: None,
+            elements: vec![],
+            start_date_time: None,
+            end_date_time: None,
+            energy_mix: None,
+            last_updated: "2019-01-14T08:00:00Z".parse().unwrap(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(
+            !json.contains("\"type\""),
+            "type must be omitted when None: {json}"
+        );
+    }
+
+    #[test]
+    fn tariff_spec_example_roundtrip() {
+        // Example from OCPI 2.2.1 mod_tariffs.asciidoc §Example
+        let json = r#"{
+            "country_code": "DE",
+            "party_id": "ALL",
+            "id": "ALLPOW2",
+            "currency": "EUR",
+            "elements": [
+                {
+                    "price_components": [
+                        {"type": "FLAT", "price": 0.00, "step_size": 1},
+                        {"type": "TIME", "price": 2.00, "step_size": 300}
+                    ]
+                }
+            ],
+            "last_updated": "2018-12-05T10:04:04Z"
+        }"#;
+        let tariff: Tariff = serde_json::from_str(json).unwrap();
+        assert_eq!(tariff.id.as_str(), "ALLPOW2");
+        assert_eq!(tariff.currency, "EUR");
+        assert!(tariff.tariff_type.is_none());
+        assert_eq!(tariff.elements.len(), 1);
+        assert_eq!(tariff.elements[0].price_components.len(), 2);
+        assert_eq!(
+            tariff.elements[0].price_components[0].component_type,
+            TariffDimensionType::Flat
+        );
+        assert_eq!(
+            tariff.elements[0].price_components[1].component_type,
+            TariffDimensionType::Time
+        );
+        assert!((tariff.elements[0].price_components[1].price - 2.00).abs() < f64::EPSILON);
+        assert_eq!(tariff.elements[0].price_components[1].step_size, 300);
     }
 }
