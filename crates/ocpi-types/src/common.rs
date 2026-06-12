@@ -138,6 +138,8 @@ pub type CiString36 = CiString<36>;
 pub type CiString39 = CiString<39>;
 /// `CiString(48)` — EVSE IDs (eMI3 EVSE ID standard, up to 48 chars).
 pub type CiString48 = CiString<48>;
+/// `CiString(64)` — token display numbers and similar 64-char case-insensitive fields.
+pub type CiString64 = CiString<64>;
 /// `CiString(255)` — general-purpose, matches the URL field limit.
 pub type CiString255 = CiString<255>;
 

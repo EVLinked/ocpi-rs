@@ -44,19 +44,20 @@ pub mod v2_2_1;
 pub mod v2_3_0;
 
 pub use common::{
-    CiString, CiString2, CiString255, CiString3, CiString36, CiString39, CiString48, DisplayText,
-    EnergyMix, EnergySource, EnergySourceCategory, EnvironmentalImpact,
+    CiString, CiString2, CiString255, CiString3, CiString36, CiString39, CiString48, CiString64,
+    DisplayText, EnergyMix, EnergySource, EnergySourceCategory, EnvironmentalImpact,
     EnvironmentalImpactCategory, GeoLocation, Price, Role, Url,
 };
 pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use v2_2_1::{
-    AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
-    ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat, ConnectorType, DayOfWeek,
-    PowerType, PriceComponent, ProfileType, ReservationRestrictionType, Session, SessionStatus,
-    SignedData, SignedValue, Tariff, TariffDimensionType, TariffElement, TariffRestrictions,
-    TariffType, TokenType,
+    AllowedType, AuthMethod, AuthorizationInfo, Cdr, CdrDimension, CdrDimensionType, CdrLocation,
+    CdrToken, ChargingPeriod, ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat,
+    ConnectorType, DayOfWeek, EnergyContract, LocationReferences, PowerType, PriceComponent,
+    ProfileType, ReservationRestrictionType, Session, SessionStatus, SignedData, SignedValue,
+    Tariff, TariffDimensionType, TariffElement, TariffRestrictions, TariffType, Token, TokenType,
+    WhitelistType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
 
