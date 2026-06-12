@@ -15,11 +15,23 @@ pub use error::ClientError;
 
 use ocpi_types::{
     transport::{CredentialToken, PaginatedParams, PaginationMeta},
-    v2_2_1::{Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials, Session, Tariff},
+    v2_2_1::{
+        AuthorizationInfo, Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials,
+        LocationReferences, Session, Tariff, Token, TokenType,
+    },
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
 use url::Url;
+
+fn token_type_str(t: TokenType) -> &'static str {
+    match t {
+        TokenType::AdHocUser => "AD_HOC_USER",
+        TokenType::AppUser => "APP_USER",
+        TokenType::Other => "OTHER",
+        TokenType::Rfid => "RFID",
+    }
+}
 
 /// Select the best common version from `remote` given `supported` local versions.
 ///
@@ -761,6 +773,203 @@ impl OcpiClient {
         }
         response.error_for_status()?;
         Ok(())
+    }
+
+    // ── Tokens ────────────────────────────────────────────────────────────────
+
+    /// Fetch a paginated list of tokens from an eMSP (`GET {url}`).
+    ///
+    /// `url` is the absolute URL of the eMSP's tokens sender endpoint.
+    /// `params` carries `date_from`, `date_to`, `offset`, and `limit`.
+    ///
+    /// Returns the first page of tokens plus pagination metadata. Use
+    /// `PaginationMeta.next_url` to retrieve subsequent pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn get_tokens(
+        &self,
+        url: &str,
+        params: PaginatedParams,
+    ) -> Result<(Vec<Token>, PaginationMeta), ClientError> {
+        let mut parsed = url::Url::parse(url)?;
+        if let Some(date_from) = params.date_from {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_from", &date_from.to_rfc3339());
+        }
+        if let Some(date_to) = params.date_to {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_to", &date_to.to_rfc3339());
+        }
+        if let Some(offset) = params.offset {
+            parsed
+                .query_pairs_mut()
+                .append_pair("offset", &offset.to_string());
+        }
+        if let Some(limit) = params.limit {
+            parsed
+                .query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        let response = self
+            .http
+            .get(parsed)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?
+            .error_for_status()?;
+        let hdrs = response.headers();
+        let link = hdrs
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let total_count = hdrs
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let limit_hdr = hdrs
+            .get("x-limit")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let meta = PaginationMeta::from_headers(
+            link.as_deref(),
+            total_count.as_deref(),
+            limit_hdr.as_deref(),
+        )
+        .unwrap_or(PaginationMeta {
+            next_url: None,
+            total_count: 0,
+            limit: 50,
+        });
+        let envelope: OcpiResponse<Vec<Token>> = response.json().await?;
+        let tokens = envelope.data.ok_or(ClientError::EmptyData)?;
+        Ok((tokens, meta))
+    }
+
+    /// Push or replace a token on a CPO receiver
+    /// (`PUT {url}/{country_code}/{party_id}/{token_uid}?type=`).
+    ///
+    /// `token_type` is appended as a `?type=` query parameter. Defaults to
+    /// `RFID` on the server side when omitted, but this method always sends it
+    /// explicitly for spec correctness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn put_token(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        token: &Token,
+    ) -> Result<(), ClientError> {
+        let base = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            token_uid,
+        );
+        let mut parsed = url::Url::parse(&base)?;
+        parsed
+            .query_pairs_mut()
+            .append_pair("type", token_type_str(token_type));
+        self.http
+            .put(parsed)
+            .header("Authorization", self.auth_header_value())
+            .json(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Apply a partial update (JSON merge-patch, RFC 7396) to a token on a
+    /// CPO receiver (`PATCH {url}/{country_code}/{party_id}/{token_uid}?type=`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NotFound`] when the server returns HTTP 404.
+    /// - [`ClientError::Http`] on network or server errors.
+    pub async fn patch_token<T: ocpi_types::serde::Serialize>(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        partial: &T,
+    ) -> Result<(), ClientError> {
+        let base = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            token_uid,
+        );
+        let mut parsed = url::Url::parse(&base)?;
+        parsed
+            .query_pairs_mut()
+            .append_pair("type", token_type_str(token_type));
+        let response = self
+            .http
+            .patch(parsed)
+            .header("Authorization", self.auth_header_value())
+            .json(partial)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        response.error_for_status()?;
+        Ok(())
+    }
+
+    /// Request real-time authorization for a token from an eMSP
+    /// (`POST {url}/{token_uid}/authorize?type=`).
+    ///
+    /// `location` is an optional body sent to the eMSP for location-scoped
+    /// authorization checks.
+    ///
+    /// Returns [`AuthorizationInfo`] when the token is known to the eMSP.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NotFound`] when the eMSP responds with HTTP 404
+    ///   (OCPI 2004 — token unknown).
+    /// - [`ClientError::EmptyData`] if the success envelope carries no data.
+    /// - [`ClientError::Http`] on network or server errors.
+    pub async fn authorize_token(
+        &self,
+        url: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        location: Option<&LocationReferences>,
+    ) -> Result<AuthorizationInfo, ClientError> {
+        let base = format!("{}/{token_uid}/authorize", url.trim_end_matches('/'));
+        let mut parsed = url::Url::parse(&base)?;
+        parsed
+            .query_pairs_mut()
+            .append_pair("type", token_type_str(token_type));
+        let mut req = self
+            .http
+            .post(parsed)
+            .header("Authorization", self.auth_header_value());
+        if let Some(loc) = location {
+            req = req.json(loc);
+        }
+        let response = req.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        let response = response.error_for_status()?;
+        let envelope: OcpiResponse<AuthorizationInfo> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
     }
 }
 

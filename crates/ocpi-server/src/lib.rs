@@ -11,7 +11,9 @@
 #![warn(missing_docs)]
 
 use ocpi_types::{
-    v2_2_1::{Cdr, Credentials, Session, Tariff},
+    v2_2_1::{
+        AuthorizationInfo, Cdr, Credentials, LocationReferences, Session, Tariff, Token, TokenType,
+    },
     version::{Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
 };
@@ -48,6 +50,12 @@ pub enum ServerError {
     /// Maps to OCPI status code `2003` (Unknown Location).
     #[error("not found")]
     NotFound,
+
+    /// A real-time authorization was requested for a token the eMSP does not know.
+    ///
+    /// Maps to OCPI status code `2004` (Unknown Token).
+    #[error("unknown token")]
+    UnknownToken,
 }
 
 impl ServerError {
@@ -60,6 +68,7 @@ impl ServerError {
             Self::Unauthorized => OcpiStatusCode::ClientError,
             Self::AlreadyRegistered | Self::NotRegistered => OcpiStatusCode::ClientError,
             Self::NotFound => OcpiStatusCode::UnknownLocation,
+            Self::UnknownToken => OcpiStatusCode::UnknownToken,
             Self::Ocpi(_) | Self::NotImplemented(_) => OcpiStatusCode::ServerError,
         }
     }
@@ -818,6 +827,335 @@ impl TariffsHandler for TariffsConfig {
     }
 }
 
+// ── TokensHandler ─────────────────────────────────────────────────────────────
+
+/// Handles the OCPI Tokens module endpoints.
+///
+/// Implements the **receiver** interface (CPO receives token updates from eMSP),
+/// the **sender** interface (eMSP exposes `GET /tokens` list for CPO pull), and
+/// the real-time **authorize** endpoint (eMSP receiver, CPO sender).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc`
+#[allow(async_fn_in_trait)]
+pub trait TokensHandler {
+    /// Paginated list of tokens — sender interface (`GET /tokens`).
+    ///
+    /// Returns `(page_items, total_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the query cannot be executed.
+    async fn get_tokens(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Token>, u32), ServerError>;
+
+    /// Fetch a single token by its composite key — receiver interface
+    /// (`GET /tokens/{country_code}/{party_id}/{token_uid}?type=`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the token does not exist.
+    async fn get_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+    ) -> Result<Token, ServerError>;
+
+    /// Create or replace a token — receiver interface (`PUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn put_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        token: Token,
+    ) -> Result<(), ServerError>;
+
+    /// Apply a JSON merge-patch (RFC 7396) to an existing token — receiver
+    /// interface (`PATCH`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the token does not exist.
+    async fn patch_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError>;
+
+    /// Real-time authorization — sender interface
+    /// (`POST /tokens/{token_uid}/authorize?type=`).
+    ///
+    /// Returns [`AuthorizationInfo`] when the token is known.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::UnknownToken`] (OCPI 2004) when the token is
+    /// not found in this eMSP's system.
+    async fn authorize(
+        &self,
+        token_uid: &str,
+        token_type: TokenType,
+        location: Option<LocationReferences>,
+    ) -> Result<AuthorizationInfo, ServerError>;
+}
+
+// ── TokensConfig ──────────────────────────────────────────────────────────────
+
+/// Thread-safe in-memory tokens store for use with [`http::tokens_router`].
+///
+/// Tokens are keyed by `"{country_code}/{party_id}/{token_uid}/{token_type}"`.
+/// Wrap in `Arc` to share across axum handlers or multiple threads.
+pub struct TokensConfig {
+    tokens: std::sync::RwLock<std::collections::HashMap<String, Token>>,
+}
+
+impl std::fmt::Debug for TokensConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokensConfig")
+            .field(
+                "token_count",
+                &self.tokens.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+fn token_type_str(t: TokenType) -> &'static str {
+    match t {
+        TokenType::AdHocUser => "AD_HOC_USER",
+        TokenType::AppUser => "APP_USER",
+        TokenType::Other => "OTHER",
+        TokenType::Rfid => "RFID",
+    }
+}
+
+impl TokensConfig {
+    /// Create an empty tokens store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tokens: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn composite_key(
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+    ) -> String {
+        format!(
+            "{country_code}/{party_id}/{token_uid}/{}",
+            token_type_str(token_type)
+        )
+    }
+
+    /// Insert or replace a token.
+    pub fn put(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        token: Token,
+    ) {
+        let key = Self::composite_key(country_code, party_id, token_uid, token_type);
+        self.tokens
+            .write()
+            .expect("lock not poisoned")
+            .insert(key, token);
+    }
+
+    /// Retrieve a token by its composite key.
+    #[must_use]
+    pub fn get(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+    ) -> Option<Token> {
+        let key = Self::composite_key(country_code, party_id, token_uid, token_type);
+        self.tokens
+            .read()
+            .expect("lock not poisoned")
+            .get(&key)
+            .cloned()
+    }
+
+    /// Apply a JSON merge-patch to an existing token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if no token matches the key.
+    pub fn patch_json(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, token_uid, token_type);
+        let mut map = self.tokens.write().expect("lock not poisoned");
+        let token = map.get(&key).ok_or(ServerError::NotFound)?;
+        let mut base = ocpi_types::serde_json::to_value(token.clone())
+            .map_err(|_| ServerError::NotImplemented("patch serialize"))?;
+        json_merge(&mut base, partial);
+        let updated: Token = ocpi_types::serde_json::from_value(base)
+            .map_err(|_| ServerError::NotImplemented("patch deserialize"))?;
+        map.insert(key, updated);
+        Ok(())
+    }
+
+    /// Return a filtered and paginated slice of tokens.
+    ///
+    /// Filters by `last_updated >= date_from` and (if provided)
+    /// `last_updated < date_to`. Results are sorted by `last_updated`.
+    ///
+    /// Returns `(page_items, total_matching_count)`.
+    #[must_use]
+    pub fn list(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<Token>, u32) {
+        let map = self.tokens.read().expect("lock not poisoned");
+        let mut filtered: Vec<&Token> = map
+            .values()
+            .filter(|t| t.last_updated >= date_from && date_to.is_none_or(|dt| t.last_updated < dt))
+            .collect();
+        filtered.sort_by_key(|t| t.last_updated);
+        let total = filtered.len() as u32;
+        let page: Vec<Token> = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        (page, total)
+    }
+
+    /// Perform a real-time authorization lookup by `uid` and `token_type`.
+    ///
+    /// Searches all stored tokens (regardless of owner party) for a match.
+    /// Returns [`ServerError::UnknownToken`] (OCPI 2004) when not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::UnknownToken`] if no token with the given uid and
+    /// type is known to this store.
+    pub fn authorize(
+        &self,
+        token_uid: &str,
+        token_type: TokenType,
+        location: Option<LocationReferences>,
+    ) -> Result<AuthorizationInfo, ServerError> {
+        use ocpi_types::v2_2_1::AllowedType;
+        let map = self.tokens.read().expect("lock not poisoned");
+        let token = map
+            .values()
+            .find(|t| t.uid.as_str() == token_uid && t.token_type == token_type)
+            .cloned()
+            .ok_or(ServerError::UnknownToken)?;
+        let allowed = if token.valid {
+            AllowedType::Allowed
+        } else {
+            AllowedType::Blocked
+        };
+        let location = if matches!(allowed, AllowedType::Allowed) {
+            location
+        } else {
+            None
+        };
+        Ok(AuthorizationInfo {
+            allowed,
+            token,
+            location,
+            authorization_reference: None,
+            info: None,
+        })
+    }
+}
+
+impl Default for TokensConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl TokensHandler for TokensConfig {
+    async fn get_tokens(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Token>, u32), ServerError> {
+        Ok(self.list(date_from, date_to, offset, limit))
+    }
+
+    async fn get_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+    ) -> Result<Token, ServerError> {
+        self.get(country_code, party_id, token_uid, token_type)
+            .ok_or(ServerError::NotFound)
+    }
+
+    async fn put_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        token: Token,
+    ) -> Result<(), ServerError> {
+        self.put(country_code, party_id, token_uid, token_type, token);
+        Ok(())
+    }
+
+    async fn patch_token(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        token_uid: &str,
+        token_type: TokenType,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        self.patch_json(country_code, party_id, token_uid, token_type, partial)
+    }
+
+    async fn authorize(
+        &self,
+        token_uid: &str,
+        token_type: TokenType,
+        location: Option<LocationReferences>,
+    ) -> Result<AuthorizationInfo, ServerError> {
+        self.authorize(token_uid, token_type, location)
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -853,18 +1191,21 @@ pub mod http {
         extract::{Path, Query, State},
         http::StatusCode,
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{get, post},
         Json, Router,
     };
     use ocpi_types::{
         envelope::{OcpiPaged, OcpiResponse},
         transport::PaginatedParams,
-        v2_2_1::{Cdr, Session, Tariff},
+        v2_2_1::{AuthorizationInfo, Cdr, LocationReferences, Session, Tariff, Token, TokenType},
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
-    use crate::{CdrsConfig, ServerError, SessionsConfig, TariffsConfig, VersionsConfig};
+    use crate::{
+        token_type_str, CdrsConfig, ServerError, SessionsConfig, TariffsConfig, TokensConfig,
+        VersionsConfig,
+    };
 
     // ── Versions ──────────────────────────────────────────────────────────────
 
@@ -1213,6 +1554,167 @@ pub mod http {
                 .into_response(),
         }
     }
+
+    // ── Tokens ────────────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI Tokens module.
+    ///
+    /// Exposes:
+    /// - `GET  /tokens` — paginated list (sender interface, eMSP)
+    /// - `GET  /tokens/{country_code}/{party_id}/{token_uid}?type=` — single token
+    /// - `PUT  /tokens/{country_code}/{party_id}/{token_uid}?type=` — upsert
+    /// - `PATCH /tokens/{country_code}/{party_id}/{token_uid}?type=` — merge-patch
+    /// - `POST /tokens/{token_uid}/authorize?type=` — real-time authorization
+    ///
+    /// OCPI routing headers (`OCPI-from/to-party-id/country-code`) are accepted
+    /// on all routes; they are not enforced at this layer.
+    pub fn tokens_router(config: Arc<TokensConfig>) -> Router {
+        Router::new()
+            .route("/tokens", get(tokens_list))
+            .route(
+                "/tokens/{country_code}/{party_id}/{token_uid}",
+                get(tokens_get).put(tokens_put).patch(tokens_patch),
+            )
+            .route("/tokens/{token_uid}/authorize", post(tokens_authorize))
+            .with_state(config)
+    }
+
+    #[derive(ocpi_types::serde::Deserialize)]
+    #[serde(crate = "ocpi_types::serde")]
+    struct TypeQuery {
+        #[serde(rename = "type", default = "default_token_type")]
+        token_type: TokenType,
+    }
+
+    fn default_token_type() -> TokenType {
+        TokenType::Rfid
+    }
+
+    async fn tokens_list(
+        State(cfg): State<Arc<TokensConfig>>,
+        Query(params): Query<PaginatedParams>,
+    ) -> Response {
+        use ocpi_types::chrono::TimeZone as _;
+        let date_from = params.date_from.unwrap_or_else(|| {
+            ocpi_types::Utc
+                .with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
+                .single()
+                .expect("epoch is valid")
+        });
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        let (items, total) = cfg.list(date_from, params.date_to, offset, limit);
+        let page = OcpiPaged::new(items, offset, limit, total);
+        let next_offset = page.next_offset();
+        let body = page.into_response();
+
+        let mut response = Json(body).into_response();
+        let hdrs = response.headers_mut();
+        if let Ok(v) = total.to_string().parse() {
+            hdrs.insert("x-total-count", v);
+        }
+        if let Ok(v) = limit.to_string().parse() {
+            hdrs.insert("x-limit", v);
+        }
+        if let Some(next_off) = next_offset {
+            let link = format!("</tokens?offset={next_off}&limit={limit}>; rel=\"next\"");
+            if let Ok(v) = link.parse() {
+                hdrs.insert("link", v);
+            }
+        }
+
+        response
+    }
+
+    async fn tokens_get(
+        State(cfg): State<Arc<TokensConfig>>,
+        Path((country_code, party_id, token_uid)): Path<(String, String, String)>,
+        Query(q): Query<TypeQuery>,
+    ) -> Response {
+        match cfg.get(&country_code, &party_id, &token_uid, q.token_type) {
+            Some(token) => Json(OcpiResponse::success(token)).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<Token>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!(
+                        "token {token_uid}?type={} not found",
+                        token_type_str(q.token_type)
+                    ),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn tokens_put(
+        State(cfg): State<Arc<TokensConfig>>,
+        Path((country_code, party_id, token_uid)): Path<(String, String, String)>,
+        Query(q): Query<TypeQuery>,
+        Json(token): Json<Token>,
+    ) -> Response {
+        cfg.put(&country_code, &party_id, &token_uid, q.token_type, token);
+        Json(OcpiResponse::<Token>::success_empty()).into_response()
+    }
+
+    async fn tokens_patch(
+        State(cfg): State<Arc<TokensConfig>>,
+        Path((country_code, party_id, token_uid)): Path<(String, String, String)>,
+        Query(q): Query<TypeQuery>,
+        Json(partial): Json<ocpi_types::serde_json::Value>,
+    ) -> Response {
+        match cfg.patch_json(&country_code, &party_id, &token_uid, q.token_type, partial) {
+            Ok(()) => Json(OcpiResponse::<Token>::success_empty()).into_response(),
+            Err(ServerError::NotFound) => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<Token>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!(
+                        "token {token_uid}?type={} not found",
+                        token_type_str(q.token_type)
+                    ),
+                )),
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<Token>::error(
+                    OcpiStatusCode::ServerError,
+                    "internal error",
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn tokens_authorize(
+        State(cfg): State<Arc<TokensConfig>>,
+        Path(token_uid): Path<String>,
+        Query(q): Query<TypeQuery>,
+        body: Option<Json<LocationReferences>>,
+    ) -> Response {
+        let location = body.map(|Json(loc)| loc);
+        match cfg.authorize(&token_uid, q.token_type, location) {
+            Ok(auth_info) => Json(OcpiResponse::success(auth_info)).into_response(),
+            Err(ServerError::UnknownToken) => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<AuthorizationInfo>::error(
+                    OcpiStatusCode::UnknownToken,
+                    format!("token {token_uid} not known"),
+                )),
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<AuthorizationInfo>::error(
+                    OcpiStatusCode::ServerError,
+                    "internal error",
+                )),
+            )
+                .into_response(),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1223,9 +1725,10 @@ mod tests {
     use ocpi_types::chrono::TimeZone as _;
     use ocpi_types::{
         v2_2_1::{
-            AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
-            ConnectorFormat, ConnectorType, PowerType, PriceComponent, Session, SessionStatus,
-            Tariff, TariffDimensionType, TariffElement, TokenType,
+            AllowedType, AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken,
+            ChargingPeriod, ConnectorFormat, ConnectorType, PowerType, PriceComponent, Session,
+            SessionStatus, Tariff, TariffDimensionType, TariffElement, Token, TokenType,
+            WhitelistType,
         },
         OcpiStatusCode,
     };
@@ -1688,5 +2191,178 @@ mod tests {
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].id.as_str(), "T002");
         assert_eq!(page[1].id.as_str(), "T003");
+    }
+
+    // ── TokensConfig tests ────────────────────────────────────────────────────
+
+    fn make_token(uid: &str, ts: DateTime<Utc>, valid: bool) -> Token {
+        use ocpi_types::common::{CiString2, CiString3, CiString36};
+        Token {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("MSP").unwrap(),
+            uid: CiString36::try_from(uid).unwrap(),
+            token_type: TokenType::Rfid,
+            contract_id: CiString36::try_from("NL-MSP-0001").unwrap(),
+            visual_number: None,
+            issuer: "TestIssuer".to_string(),
+            group_id: None,
+            valid,
+            whitelist: WhitelistType::Always,
+            language: None,
+            default_profile_type: None,
+            energy_contract: None,
+            last_updated: ts,
+        }
+    }
+
+    #[test]
+    fn tokens_config_put_and_get_roundtrip() {
+        let cfg = TokensConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let token = make_token("TOKEN001", ts, true);
+        cfg.put("NL", "MSP", "TOKEN001", TokenType::Rfid, token);
+        let got = cfg.get("NL", "MSP", "TOKEN001", TokenType::Rfid).unwrap();
+        assert_eq!(got.uid.as_str(), "TOKEN001");
+        assert!(got.valid);
+    }
+
+    #[test]
+    fn tokens_config_get_missing_returns_none() {
+        let cfg = TokensConfig::new();
+        assert!(cfg.get("NL", "MSP", "MISSING", TokenType::Rfid).is_none());
+    }
+
+    #[test]
+    fn tokens_config_get_wrong_type_returns_none() {
+        let cfg = TokensConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put(
+            "NL",
+            "MSP",
+            "TOKEN001",
+            TokenType::Rfid,
+            make_token("TOKEN001", ts, true),
+        );
+        assert!(cfg
+            .get("NL", "MSP", "TOKEN001", TokenType::AppUser)
+            .is_none());
+    }
+
+    #[test]
+    fn tokens_config_patch_updates_valid_field() {
+        let cfg = TokensConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put(
+            "NL",
+            "MSP",
+            "TOKEN001",
+            TokenType::Rfid,
+            make_token("TOKEN001", ts, true),
+        );
+        let patch =
+            ocpi_types::serde_json::json!({"valid": false, "last_updated": "2024-06-02T00:00:00Z"});
+        cfg.patch_json("NL", "MSP", "TOKEN001", TokenType::Rfid, patch)
+            .unwrap();
+        let updated = cfg.get("NL", "MSP", "TOKEN001", TokenType::Rfid).unwrap();
+        assert!(!updated.valid);
+    }
+
+    #[test]
+    fn tokens_config_patch_missing_returns_not_found() {
+        let cfg = TokensConfig::new();
+        let patch = ocpi_types::serde_json::json!({"valid": false});
+        let err = cfg
+            .patch_json("NL", "MSP", "MISSING", TokenType::Rfid, patch)
+            .unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn tokens_config_list_filters_by_date_from() {
+        let cfg = TokensConfig::new();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put(
+            "NL",
+            "MSP",
+            "T001",
+            TokenType::Rfid,
+            make_token("T001", t1, true),
+        );
+        cfg.put(
+            "NL",
+            "MSP",
+            "T002",
+            TokenType::Rfid,
+            make_token("T002", t2, true),
+        );
+
+        let cutoff = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(cutoff, None, 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].uid.as_str(), "T002");
+    }
+
+    #[test]
+    fn tokens_config_list_pagination() {
+        let cfg = TokensConfig::new();
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        for i in 0u32..5 {
+            let ts = epoch + ocpi_types::chrono::Duration::seconds(i64::from(i));
+            let uid = format!("T{i:03}");
+            cfg.put(
+                "NL",
+                "MSP",
+                &uid,
+                TokenType::Rfid,
+                make_token(&uid, ts, true),
+            );
+        }
+
+        let (page, total) = cfg.list(epoch, None, 2, 2);
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].uid.as_str(), "T002");
+        assert_eq!(page[1].uid.as_str(), "T003");
+    }
+
+    #[test]
+    fn tokens_config_authorize_valid_token_returns_allowed() {
+        let cfg = TokensConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put(
+            "NL",
+            "MSP",
+            "RFID001",
+            TokenType::Rfid,
+            make_token("RFID001", ts, true),
+        );
+        let result = cfg.authorize("RFID001", TokenType::Rfid, None).unwrap();
+        assert_eq!(result.allowed, AllowedType::Allowed);
+        assert_eq!(result.token.uid.as_str(), "RFID001");
+        assert!(result.location.is_none());
+    }
+
+    #[test]
+    fn tokens_config_authorize_invalid_token_returns_blocked() {
+        let cfg = TokensConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put(
+            "NL",
+            "MSP",
+            "RFID002",
+            TokenType::Rfid,
+            make_token("RFID002", ts, false),
+        );
+        let result = cfg.authorize("RFID002", TokenType::Rfid, None).unwrap();
+        assert_eq!(result.allowed, AllowedType::Blocked);
+    }
+
+    #[test]
+    fn tokens_config_authorize_unknown_token_returns_unknown_token_error() {
+        let cfg = TokensConfig::new();
+        let err = cfg.authorize("UNKNOWN", TokenType::Rfid, None).unwrap_err();
+        assert!(matches!(err, ServerError::UnknownToken));
+        assert_eq!(err.status_code(), OcpiStatusCode::UnknownToken);
     }
 }
