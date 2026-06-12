@@ -5,6 +5,32 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 6) — M6 Commands data types (issue #50)
+
+- **Issue #50:** M6: Commands data types — CommandType, CommandResponseType, CommandResultType, CancelReservation, ReserveNow, StartSession, StopSession, UnlockConnector, CommandResponse, CommandResult
+- **Branch:** `claude/sweet-hopper-a95fez`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (222 total, +13 new Commands tests) `deny check` ✅ (no new deps; cargo-deny not installed locally, trusted CI)
+- **What shipped:**
+  - `CommandType` enum (5 variants: CANCEL_RESERVATION, RESERVE_NOW, START_SESSION, STOP_SESSION, UNLOCK_CONNECTOR) — used as URL path segment in receiver interface
+  - `CommandResponseType` enum (4 variants: NOT_SUPPORTED, REJECTED, ACCEPTED, UNKNOWN_SESSION) — CPO's immediate acknowledgment
+  - `CommandResultType` enum (9 variants: ACCEPTED, CANCELED_RESERVATION, EVSE_OCCUPIED, EVSE_INOPERATIVE, FAILED, NOT_SUPPORTED, REJECTED, TIMEOUT, UNKNOWN_RESERVATION) — async Charge Point result
+  - `CancelReservation` struct (`response_url: Url`, `reservation_id: CiString36`)
+  - `ReserveNow` struct (7 fields: response_url, token, expiry_date, reservation_id, location_id, optional evse_uid, optional authorization_reference)
+  - `StartSession` struct (6 fields: response_url, token, location_id, optional evse_uid, optional connector_id, optional authorization_reference)
+  - `StopSession` struct (response_url, session_id)
+  - `UnlockConnector` struct (response_url, location_id, evse_uid, connector_id)
+  - `CommandResponse` struct (result: CommandResponseType, timeout: u32, message: Vec<DisplayText> omitted if empty)
+  - `CommandResult` struct (result: CommandResultType, message: Vec<DisplayText> omitted if empty)
+  - All types re-exported from `ocpi-types` crate root
+  - 13 new tests: enum SCREAMING_SNAKE_CASE, struct roundtrips, optional field omission, spec-example JSON
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human, dirty state — merge conflict comment posted), PR #31 (needs-human, all CI ✅). Neither has review comments. PR #24's dirty state requires owner action (rebase onto current main; complex conflicts in `lib.rs` after M4/M5 squash-merges).
+- **Groomed M6:** Created issues #50 (Commands types, P1), #51 (Commands server+client, P1), #52 (HubClientInfo, P2).
+- **PR #24 dirty state root cause:** Branch `nightly/2026-06-11-issue-22` diverged from main before M4/M5 landed; squash-merges created different SHAs; merging current main → branch yields 9 conflict regions in `ocpi-server/src/lib.rs`. Attempted merge aborted — safe resolution requires owner rebase or cherry-pick.
+- **Next:** #51 (M6: Commands server handler + client, P1) — unblocked, builds on #50. Alternatively #29 (M3: Locations server handler) once PR #31 merges, or #33 (M2 credentials fetch-back) once PR #24 merges.
+
+---
+
 ## 2026-06-12 (run 5) — M5 Tokens server handler + client (issue #45)
 
 - **Issue #45:** M5: Tokens server handler trait + axum `tokens_router()` + client methods (including real-time authorize)

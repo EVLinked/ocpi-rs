@@ -52,12 +52,14 @@ pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use v2_2_1::{
-    AllowedType, AuthMethod, AuthorizationInfo, Cdr, CdrDimension, CdrDimensionType, CdrLocation,
-    CdrToken, ChargingPeriod, ChargingPreferences, ChargingPreferencesResponse, ConnectorFormat,
-    ConnectorType, DayOfWeek, EnergyContract, LocationReferences, PowerType, PriceComponent,
-    ProfileType, ReservationRestrictionType, Session, SessionStatus, SignedData, SignedValue,
-    Tariff, TariffDimensionType, TariffElement, TariffRestrictions, TariffType, Token, TokenType,
-    WhitelistType,
+    AllowedType, AuthMethod, AuthorizationInfo, CancelReservation, Cdr, CdrDimension,
+    CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod, ChargingPreferences,
+    ChargingPreferencesResponse, CommandResponse, CommandResponseType, CommandResult,
+    CommandResultType, CommandType, ConnectorFormat, ConnectorType, DayOfWeek, EnergyContract,
+    LocationReferences, PowerType, PriceComponent, ProfileType, ReservationRestrictionType,
+    ReserveNow, Session, SessionStatus, SignedData, SignedValue, StartSession, StopSession, Tariff,
+    TariffDimensionType, TariffElement, TariffRestrictions, TariffType, Token, TokenType,
+    UnlockConnector, WhitelistType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
 
