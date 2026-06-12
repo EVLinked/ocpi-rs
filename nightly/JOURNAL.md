@@ -5,6 +5,35 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 — M4: Sessions data types + shared CDR primitives (issue #34)
+
+- **Issue:** #34 — M4: Sessions data types — Session, ChargingPreferences, shared ChargingPeriod/CdrDimension types
+- **Branch:** `claude/amazing-shannon-tn52qw`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (136 tests, +19 new) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - `TokenType` enum (4 variants: AD_HOC_USER, APP_USER, OTHER, RFID) — forward reference for Tokens module M5
+  - `AuthMethod` enum (AUTH_REQUEST, COMMAND, WHITELIST) — from CDRs spec, shared with Sessions
+  - `CdrToken` struct (country_code, party_id, uid, token_type, contract_id) — `type` field renamed to `token_type` in Rust; wire name preserved via `#[serde(rename = "type")]`
+  - `CdrDimensionType` enum (13 variants: CURRENT, ENERGY, ENERGY_EXPORT, …, TIME)
+  - `CdrDimension` struct (dimension_type, volume: f64) — same rename pattern for `type` field
+  - `ChargingPeriod` struct (start_date_time, dimensions, optional tariff_id) — shared between Sessions and CDRs
+  - `SessionStatus` enum (ACTIVE, COMPLETED, INVALID, PENDING, RESERVATION)
+  - `ProfileType` enum (CHEAP, FAST, GREEN, REGULAR)
+  - `ChargingPreferencesResponse` enum (5 variants)
+  - `ChargingPreferences` struct (profile_type, optional departure_time/energy_need/discharge_allowed)
+  - `Session` struct (15 fields; `charging_periods: Vec<ChargingPeriod>` uses default+skip_serializing_if)
+  - All new types re-exported from `ocpi-types` crate root
+  - 19 new tests: SCREAMING_SNAKE_CASE serde, round-trips, spec example JSON deserialization
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **LOC note:** 641 insertions; ~250 production code, rest doc comments + 19 tests. Over 500 LOC guideline, but the types form one coherent unit (Session depends on CdrToken, ChargingPeriod, etc.).
+- **Sync note:** PR #24 (issue #22) and PR #31 (issues #28, #12) still open, both `needs-human`, both CI ✅. At 2-PR limit; this PR is auto-merge eligible (no needs-human).
+- **`type` field rename pattern:** `CdrDimension.type` → `dimension_type` and `CdrToken.type` → `token_type` in Rust; wire names preserved via `#[serde(rename = "type")]`. CDR types issue (#35) MUST follow the same pattern.
+- **Shared types placement:** CdrToken, AuthMethod, CdrDimension/Type, ChargingPeriod all live in `v2_2_1.rs` now. Issue #35 (CDR data types) should re-export from there rather than redefining them.
+- **Next:** #29 (M3: Locations server handler) or #35 (M4: CDR data types). #29 depends on PR #31 (Locations types) merging first. #35 can start immediately using the shared types just added. Suggest #35 next.
+
+---
+
 ## 2026-06-11 (run 3) — M1: common data types — Price, EnergyMix, GeoLocation/DisplayText validation (issue #7)
 
 - **Issue:** #7 — M1: Expand common data types (Price, EnergyMix, Tariff primitives)
