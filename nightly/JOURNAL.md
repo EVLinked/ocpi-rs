@@ -5,6 +5,32 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 5) — M5 Tokens server handler + client (issue #45)
+
+- **Issue #45:** M5: Tokens server handler trait + axum `tokens_router()` + client methods (including real-time authorize)
+- **Branch:** `claude/sweet-hopper-46b567`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (209 total, +10 new TokensConfig tests)
+- **What shipped:**
+  - `TokensHandler` trait: sender `get_tokens` (paginated); receiver `get_token`, `put_token`, `patch_token`, `authorize` — `#[allow(async_fn_in_trait)]`
+  - `ServerError::UnknownToken` variant → OCPI status code `2004` (`OcpiStatusCode::UnknownToken`)
+  - Private `token_type_str(TokenType) -> &'static str` helper mapping enum → SCREAMING_SNAKE_CASE wire strings
+  - `TokensConfig`: `RwLock<HashMap<String, Token>>` keyed by `"{country_code}/{party_id}/{token_uid}/{token_type_str}"` (type included in key per spec — uid alone does not uniquely identify a token); `new()`, `put()`, `get()`, `patch_json()`, `list()`, `authorize()`
+  - `authorize()`: linear O(n) scan matching `uid + type` across all cc/party entries (no cc/party in the POST path); returns `AllowedType::Allowed` if `token.valid`, `AllowedType::Blocked` otherwise; `UnknownToken` if not found
+  - `tokens_router(Arc<TokensConfig>) -> Router`: `GET /tokens` (paginated), `GET/PUT/PATCH /tokens/{cc}/{party}/{uid}`, `POST /tokens/{uid}/authorize` — no route conflict (3-segment vs 2-segment-with-literal)
+  - `?type` query param: `TypeQuery { token_type: TokenType }` with `default_token_type() -> TokenType::Rfid` — absent param defaults to RFID per spec
+  - Optional authorize body: `Option<Json<LocationReferences>>` — axum returns `None` when body absent/unparseable
+  - `OcpiClient::get_tokens` — paginated list with PaginationMeta
+  - `OcpiClient::put_token` — PUT to `{url}/{cc}/{party}/{uid}?type=…`
+  - `OcpiClient::patch_token` — PATCH with partial payload
+  - `OcpiClient::authorize_token` — POST to `{url}/{uid}/authorize?type=…`; optional body; 404 → `ClientError::NotFound`
+  - 10 new `TokensConfig` unit tests: put+get roundtrip, get-missing, put-overwrite, patch, list filters, pagination, authorize-valid, authorize-blocked, authorize-missing
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human, 1 CI check ✅), PR #31 (needs-human, all CI ✅). Both open with no review comments.
+- **Serde-without-direct-dep fix:** `ocpi-server` has no direct `serde` dep. Using `#[derive(serde::Deserialize)]` triggers `E0433: use of undeclared crate or module serde`. Fix: `#[derive(ocpi_types::serde::Deserialize)]` + `#[serde(crate = "ocpi_types::serde")]` — tells the proc-macro to use the re-exported path. See LEARNINGS.md.
+- **Next:** #29/#30 (M3 Locations server/client) once PR #31 merges (Locations types are already in). Alternatively #33 (M2 credentials fetch-back) once PR #24 merges. Both #24 and #31 are `needs-human` waiting for owner merge.
+
+---
+
 ## 2026-06-12 (run 4) — M5 Tariffs server handler + client (issue #44)
 
 - **Issue #44:** M5: Tariffs server handler trait + axum `tariffs_router()` + client methods
