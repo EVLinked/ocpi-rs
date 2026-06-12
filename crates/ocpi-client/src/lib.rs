@@ -15,7 +15,7 @@ pub use error::ClientError;
 
 use ocpi_types::{
     transport::{CredentialToken, PaginatedParams, PaginationMeta},
-    v2_2_1::{Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials, Session},
+    v2_2_1::{Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials, Session, Tariff},
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
@@ -587,6 +587,180 @@ impl OcpiClient {
             .map(|s| s.to_owned())
             .ok_or(ClientError::EmptyData)?;
         Ok(location)
+    }
+
+    // ── Tariffs ───────────────────────────────────────────────────────────────
+
+    /// Fetch a paginated list of tariffs from a CPO (`GET {url}`).
+    ///
+    /// `url` is the absolute URL of the CPO's tariffs sender endpoint.
+    /// `params` carries `date_from`, `date_to`, `offset`, and `limit`.
+    ///
+    /// Returns the first page of tariffs plus pagination metadata. Use
+    /// `PaginationMeta.next_url` to retrieve subsequent pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn get_tariffs(
+        &self,
+        url: &str,
+        params: PaginatedParams,
+    ) -> Result<(Vec<Tariff>, PaginationMeta), ClientError> {
+        let mut parsed = url::Url::parse(url)?;
+        if let Some(date_from) = params.date_from {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_from", &date_from.to_rfc3339());
+        }
+        if let Some(date_to) = params.date_to {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_to", &date_to.to_rfc3339());
+        }
+        if let Some(offset) = params.offset {
+            parsed
+                .query_pairs_mut()
+                .append_pair("offset", &offset.to_string());
+        }
+        if let Some(limit) = params.limit {
+            parsed
+                .query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        let response = self
+            .http
+            .get(parsed)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?
+            .error_for_status()?;
+        let hdrs = response.headers();
+        let link = hdrs
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let total_count = hdrs
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let limit_hdr = hdrs
+            .get("x-limit")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let meta = PaginationMeta::from_headers(
+            link.as_deref(),
+            total_count.as_deref(),
+            limit_hdr.as_deref(),
+        )
+        .unwrap_or(PaginationMeta {
+            next_url: None,
+            total_count: 0,
+            limit: 50,
+        });
+        let envelope: OcpiResponse<Vec<Tariff>> = response.json().await?;
+        let tariffs = envelope.data.ok_or(ClientError::EmptyData)?;
+        Ok((tariffs, meta))
+    }
+
+    /// Fetch a single tariff from an eMSP receiver
+    /// (`GET {url}/{country_code}/{party_id}/{tariff_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::NotFound`] when the remote responds with HTTP 404.
+    /// Returns [`ClientError`] for other failures.
+    pub async fn get_tariff(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<Tariff, ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            tariff_id,
+        );
+        let response = self
+            .http
+            .get(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        let response = response.error_for_status()?;
+        let envelope: OcpiResponse<Tariff> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Push or replace a tariff on an eMSP receiver
+    /// (`PUT {url}/{country_code}/{party_id}/{tariff_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn put_tariff(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+        tariff: &Tariff,
+    ) -> Result<(), ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            tariff_id,
+        );
+        self.http
+            .put(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .json(tariff)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Delete a tariff from an eMSP receiver
+    /// (`DELETE {url}/{country_code}/{party_id}/{tariff_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::NotFound`] when the remote responds with HTTP 404.
+    /// Returns [`ClientError`] for other failures.
+    pub async fn delete_tariff(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<(), ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            tariff_id,
+        );
+        let response = self
+            .http
+            .delete(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        response.error_for_status()?;
+        Ok(())
     }
 }
 

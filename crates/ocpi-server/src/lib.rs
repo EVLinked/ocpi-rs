@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use ocpi_types::{
-    v2_2_1::{Cdr, Credentials, Session},
+    v2_2_1::{Cdr, Credentials, Session, Tariff},
     version::{Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
 };
@@ -598,6 +598,226 @@ impl CdrsHandler for CdrsConfig {
     }
 }
 
+// ── TariffsHandler ────────────────────────────────────────────────────────────
+
+/// Handles the OCPI Tariffs module endpoints.
+///
+/// Implements the **sender** interface (CPO exposes `GET /tariffs`) and the
+/// **receiver** interface (eMSP exposes `GET/PUT/DELETE
+/// /tariffs/{country_code}/{party_id}/{tariff_id}`).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc`
+#[allow(async_fn_in_trait)]
+pub trait TariffsHandler {
+    /// Paginated list of tariffs whose `last_updated` is in
+    /// `[date_from, date_to)` — sender interface (`GET /tariffs`).
+    ///
+    /// Returns `(page_items, total_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the query cannot be executed.
+    async fn get_tariffs(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Tariff>, u32), ServerError>;
+
+    /// Fetch a single tariff by its composite key — receiver interface
+    /// (`GET /tariffs/{country_code}/{party_id}/{tariff_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the tariff does not exist.
+    async fn get_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<Tariff, ServerError>;
+
+    /// Create or replace a tariff — receiver interface (`PUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn put_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+        tariff: Tariff,
+    ) -> Result<(), ServerError>;
+
+    /// Delete a tariff — receiver interface (`DELETE`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the tariff does not exist.
+    async fn delete_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<(), ServerError>;
+}
+
+// ── TariffsConfig ─────────────────────────────────────────────────────────────
+
+/// Thread-safe in-memory tariffs store for use with [`http::tariffs_router`].
+///
+/// Tariffs are keyed by `"{country_code}/{party_id}/{tariff_id}"`. Wrap in
+/// `Arc` to share across axum handlers or multiple threads.
+pub struct TariffsConfig {
+    tariffs: std::sync::RwLock<std::collections::HashMap<String, Tariff>>,
+}
+
+impl std::fmt::Debug for TariffsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TariffsConfig")
+            .field(
+                "tariff_count",
+                &self.tariffs.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl TariffsConfig {
+    /// Create an empty tariffs store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tariffs: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn composite_key(country_code: &str, party_id: &str, tariff_id: &str) -> String {
+        format!("{country_code}/{party_id}/{tariff_id}")
+    }
+
+    /// Insert or replace a tariff.
+    pub fn put(&self, country_code: &str, party_id: &str, tariff_id: &str, tariff: Tariff) {
+        let key = Self::composite_key(country_code, party_id, tariff_id);
+        self.tariffs
+            .write()
+            .expect("lock not poisoned")
+            .insert(key, tariff);
+    }
+
+    /// Retrieve a tariff by its composite key.
+    #[must_use]
+    pub fn get(&self, country_code: &str, party_id: &str, tariff_id: &str) -> Option<Tariff> {
+        let key = Self::composite_key(country_code, party_id, tariff_id);
+        self.tariffs
+            .read()
+            .expect("lock not poisoned")
+            .get(&key)
+            .cloned()
+    }
+
+    /// Remove a tariff by its composite key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if no tariff matches the key.
+    pub fn delete(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, tariff_id);
+        let mut map = self.tariffs.write().expect("lock not poisoned");
+        if map.remove(&key).is_some() {
+            Ok(())
+        } else {
+            Err(ServerError::NotFound)
+        }
+    }
+
+    /// Return a filtered and paginated slice of tariffs.
+    ///
+    /// Filters by `last_updated >= date_from` and (if provided)
+    /// `last_updated < date_to`. Results are sorted by `last_updated`.
+    ///
+    /// Returns `(page_items, total_matching_count)`.
+    #[must_use]
+    pub fn list(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<Tariff>, u32) {
+        let map = self.tariffs.read().expect("lock not poisoned");
+        let mut filtered: Vec<&Tariff> = map
+            .values()
+            .filter(|t| t.last_updated >= date_from && date_to.is_none_or(|dt| t.last_updated < dt))
+            .collect();
+        filtered.sort_by_key(|t| t.last_updated);
+        let total = filtered.len() as u32;
+        let page: Vec<Tariff> = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        (page, total)
+    }
+}
+
+impl Default for TariffsConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl TariffsHandler for TariffsConfig {
+    async fn get_tariffs(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Tariff>, u32), ServerError> {
+        Ok(self.list(date_from, date_to, offset, limit))
+    }
+
+    async fn get_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<Tariff, ServerError> {
+        self.get(country_code, party_id, tariff_id)
+            .ok_or(ServerError::NotFound)
+    }
+
+    async fn put_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+        tariff: Tariff,
+    ) -> Result<(), ServerError> {
+        self.put(country_code, party_id, tariff_id, tariff);
+        Ok(())
+    }
+
+    async fn delete_tariff(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        tariff_id: &str,
+    ) -> Result<(), ServerError> {
+        self.delete(country_code, party_id, tariff_id)
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -639,12 +859,12 @@ pub mod http {
     use ocpi_types::{
         envelope::{OcpiPaged, OcpiResponse},
         transport::PaginatedParams,
-        v2_2_1::{Cdr, Session},
+        v2_2_1::{Cdr, Session, Tariff},
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
-    use crate::{CdrsConfig, ServerError, SessionsConfig, VersionsConfig};
+    use crate::{CdrsConfig, ServerError, SessionsConfig, TariffsConfig, VersionsConfig};
 
     // ── Versions ──────────────────────────────────────────────────────────────
 
@@ -883,6 +1103,116 @@ pub mod http {
         }
         response
     }
+
+    // ── Tariffs ───────────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI Tariffs module.
+    ///
+    /// Exposes:
+    /// - `GET  /tariffs` — paginated list (sender interface, CPO)
+    /// - `GET  /tariffs/{country_code}/{party_id}/{tariff_id}` — single tariff
+    /// - `PUT  /tariffs/{country_code}/{party_id}/{tariff_id}` — upsert
+    /// - `DELETE /tariffs/{country_code}/{party_id}/{tariff_id}` — remove
+    ///
+    /// OCPI routing headers (`OCPI-from/to-party-id/country-code`) are accepted
+    /// on all routes; they are not enforced at this layer.
+    pub fn tariffs_router(config: Arc<TariffsConfig>) -> Router {
+        Router::new()
+            .route("/tariffs", get(tariffs_list))
+            .route(
+                "/tariffs/{country_code}/{party_id}/{tariff_id}",
+                get(tariffs_get).put(tariffs_put).delete(tariffs_delete),
+            )
+            .with_state(config)
+    }
+
+    async fn tariffs_list(
+        State(cfg): State<Arc<TariffsConfig>>,
+        Query(params): Query<PaginatedParams>,
+    ) -> Response {
+        use ocpi_types::chrono::TimeZone as _;
+        let date_from = params.date_from.unwrap_or_else(|| {
+            ocpi_types::Utc
+                .with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
+                .single()
+                .expect("epoch is valid")
+        });
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        let (items, total) = cfg.list(date_from, params.date_to, offset, limit);
+        let page = OcpiPaged::new(items, offset, limit, total);
+        let next_offset = page.next_offset();
+        let body = page.into_response();
+
+        let mut response = Json(body).into_response();
+        let hdrs = response.headers_mut();
+        if let Ok(v) = total.to_string().parse() {
+            hdrs.insert("x-total-count", v);
+        }
+        if let Ok(v) = limit.to_string().parse() {
+            hdrs.insert("x-limit", v);
+        }
+        if let Some(next_off) = next_offset {
+            let link = format!("</tariffs?offset={next_off}&limit={limit}>; rel=\"next\"");
+            if let Ok(v) = link.parse() {
+                hdrs.insert("link", v);
+            }
+        }
+
+        response
+    }
+
+    async fn tariffs_get(
+        State(cfg): State<Arc<TariffsConfig>>,
+        Path((country_code, party_id, tariff_id)): Path<(String, String, String)>,
+    ) -> Response {
+        match cfg.get(&country_code, &party_id, &tariff_id) {
+            Some(tariff) => Json(OcpiResponse::success(tariff)).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<Tariff>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!("tariff {tariff_id} not found"),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn tariffs_put(
+        State(cfg): State<Arc<TariffsConfig>>,
+        Path((country_code, party_id, tariff_id)): Path<(String, String, String)>,
+        Json(tariff): Json<Tariff>,
+    ) -> Response {
+        cfg.put(&country_code, &party_id, &tariff_id, tariff);
+        Json(OcpiResponse::<Tariff>::success_empty()).into_response()
+    }
+
+    async fn tariffs_delete(
+        State(cfg): State<Arc<TariffsConfig>>,
+        Path((country_code, party_id, tariff_id)): Path<(String, String, String)>,
+    ) -> Response {
+        match cfg.delete(&country_code, &party_id, &tariff_id) {
+            Ok(()) => Json(OcpiResponse::<Tariff>::success_empty()).into_response(),
+            Err(ServerError::NotFound) => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<Tariff>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!("tariff {tariff_id} not found"),
+                )),
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<Tariff>::error(
+                    OcpiStatusCode::ServerError,
+                    "internal error",
+                )),
+            )
+                .into_response(),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -894,7 +1224,8 @@ mod tests {
     use ocpi_types::{
         v2_2_1::{
             AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
-            ConnectorFormat, ConnectorType, PowerType, Session, SessionStatus, TokenType,
+            ConnectorFormat, ConnectorType, PowerType, PriceComponent, Session, SessionStatus,
+            Tariff, TariffDimensionType, TariffElement, TokenType,
         },
         OcpiStatusCode,
     };
@@ -1244,5 +1575,118 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let url = cfg.store(make_cdr("CDR001", ts));
         assert_eq!(url, "https://example.com/ocpi/2.2.1/cdrs/CDR001");
+    }
+
+    // ── TariffsConfig tests ───────────────────────────────────────────────────
+
+    fn make_tariff(id: &str, ts: DateTime<Utc>) -> Tariff {
+        use ocpi_types::common::{CiString2, CiString3, CiString36};
+        Tariff {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("CPO").unwrap(),
+            id: CiString36::try_from(id).unwrap(),
+            currency: "EUR".to_string(),
+            tariff_type: None,
+            tariff_alt_text: vec![],
+            tariff_alt_url: None,
+            min_price: None,
+            max_price: None,
+            elements: vec![TariffElement {
+                price_components: vec![PriceComponent {
+                    component_type: TariffDimensionType::Energy,
+                    price: 0.25,
+                    vat: None,
+                    step_size: 1,
+                }],
+                restrictions: None,
+            }],
+            start_date_time: None,
+            end_date_time: None,
+            energy_mix: None,
+            last_updated: ts,
+        }
+    }
+
+    #[test]
+    fn tariffs_config_put_and_get_roundtrip() {
+        let cfg = TariffsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let t = make_tariff("TARIFF001", ts);
+        cfg.put("NL", "CPO", "TARIFF001", t);
+        let got = cfg.get("NL", "CPO", "TARIFF001").unwrap();
+        assert_eq!(got.id.as_str(), "TARIFF001");
+        assert_eq!(got.currency, "EUR");
+    }
+
+    #[test]
+    fn tariffs_config_get_missing_returns_none() {
+        let cfg = TariffsConfig::new();
+        assert!(cfg.get("NL", "CPO", "MISSING").is_none());
+    }
+
+    #[test]
+    fn tariffs_config_delete_removes_tariff() {
+        let cfg = TariffsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", "T001", make_tariff("T001", ts));
+        cfg.delete("NL", "CPO", "T001").unwrap();
+        assert!(cfg.get("NL", "CPO", "T001").is_none());
+    }
+
+    #[test]
+    fn tariffs_config_delete_unknown_returns_not_found() {
+        let cfg = TariffsConfig::new();
+        let err = cfg.delete("NL", "CPO", "MISSING").unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn tariffs_config_list_filters_by_date_from() {
+        let cfg = TariffsConfig::new();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", "T001", make_tariff("T001", t1));
+        cfg.put("NL", "CPO", "T002", make_tariff("T002", t2));
+
+        let cutoff = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(cutoff, None, 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id.as_str(), "T002");
+    }
+
+    #[test]
+    fn tariffs_config_list_filters_by_date_to() {
+        let cfg = TariffsConfig::new();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", "T001", make_tariff("T001", t1));
+        cfg.put("NL", "CPO", "T002", make_tariff("T002", t2));
+
+        let from = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(from, Some(to), 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id.as_str(), "T001");
+    }
+
+    #[test]
+    fn tariffs_config_list_pagination() {
+        let cfg = TariffsConfig::new();
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        for i in 0u32..5 {
+            let ts = epoch + ocpi_types::chrono::Duration::seconds(i64::from(i));
+            cfg.put(
+                "NL",
+                "CPO",
+                &format!("T{i:03}"),
+                make_tariff(&format!("T{i:03}"), ts),
+            );
+        }
+
+        let (page, total) = cfg.list(epoch, None, 2, 2);
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id.as_str(), "T002");
+        assert_eq!(page[1].id.as_str(), "T003");
     }
 }

@@ -5,6 +5,28 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 4) — M5 Tariffs server handler + client (issue #44)
+
+- **Issue #44:** M5: Tariffs server handler trait + axum `tariffs_router()` + client methods
+- **Branch:** `claude/sweet-hopper-p0vuro`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (199 total, +7 new TariffsConfig tests) `deny check` ✅ (no new deps; cargo-deny not installed locally, trusted CI)
+- **What shipped:**
+  - `TariffsHandler` trait (sender: `get_tariffs`; receiver: `get_tariff`, `put_tariff`, `delete_tariff`) — `#[allow(async_fn_in_trait)]`
+  - `TariffsConfig`: `RwLock<HashMap<String, Tariff>>` keyed by `{country_code}/{party_id}/{tariff_id}`; `new()`, `put()`, `get()`, `delete()` (returns `ServerError::NotFound` on unknown key), `list(date_from, date_to, offset, limit)`
+  - `tariffs_router(Arc<TariffsConfig>) -> Router`: `GET /tariffs` (paginated with X-Total-Count/X-Limit/Link), `GET/PUT/DELETE /tariffs/{cc}/{party}/{tariff_id}`
+  - No PATCH — not in the Tariffs spec (unlike Sessions)
+  - `OcpiClient::get_tariffs` — paginated list with PaginationMeta (same pattern as `get_cdrs`)
+  - `OcpiClient::get_tariff` — single fetch, maps HTTP 404 → `ClientError::NotFound`
+  - `OcpiClient::put_tariff` — PUT to receiver, `error_for_status()` only
+  - `OcpiClient::delete_tariff` — DELETE to receiver, maps HTTP 404 → `ClientError::NotFound`
+  - 7 new TariffsConfig unit tests: put+get roundtrip, get missing→None, delete removes, delete unknown→NotFound, filter by date_from, filter by date_to, pagination
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human, 1 CI check ✅), PR #31 (needs-human, all CI ✅). Both open with no review comments.
+- **Tariffs have no PATCH:** The Tariffs spec (mod_tariffs.asciidoc §Receiver Interface) only defines GET/PUT/DELETE. No merge-patch needed — confirmed by spec diff.
+- **Next:** #45 (M5 Tokens server handler + client) — unblocked (Token types merged in #47). More complex than Tariffs: requires `?type` query param (default `RFID`), real-time `POST /tokens/{uid}/authorize` endpoint, and merge-patch PATCH. Alternatively #29/#30 (M3 Locations server/client) once PR #31 merges.
+
+---
+
 ## 2026-06-12 (run 3) — M5 Token data types (issue #43)
 
 - **Issue #43:** M5: Token data types — `Token`, `EnergyContract`, `AuthorizationInfo`, `LocationReferences`, `WhitelistType`, `AllowedType`, `CiString64`
