@@ -53,6 +53,13 @@ cycle. Keep entries short and specific. Prune contradictions.
   standard alphabet) encoding of the raw credentials token. 2.1.1/2.2
   implementations often skip the encoding; interop requires a config flag at the
   HTTP client layer, not in the type model.
+- **Lenient header parsing: try-Base64-first is ambiguous but unavoidable.** For
+  server-side compat with mixed 2.1.1/2.2/2.2.1 peers, try Base64-decode first;
+  if that yields valid UTF-8, use the decoded result. Otherwise treat the raw
+  tail as a plaintext token. Document the caveat: raw tokens that are
+  coincidentally valid Base64 will be decoded incorrectly. Expose as two separate
+  functions (`from_header_value` strict vs `from_header_value_lenient`) so call
+  sites are self-documenting.
 - **`base64 0.22` is already a transitive dep** (comes in via reqwest). Promoting
   it to a direct workspace dep does NOT add a new package to Cargo.lock and does
   not require a `needs-human` for the dep itself, but touching workspace
@@ -81,3 +88,10 @@ cycle. Keep entries short and specific. Prune contradictions.
 - **axum method routing on a single path** — use `.route("/path", get(a).post(b).put(c).delete(d))` to register multiple HTTP methods on the same URL. Do NOT import `routing::{post, put, delete}` — those are for separate `.route()` calls; importing them when unused triggers `unused-imports` under `-D warnings`.
 - **`tower` as dev-dep for axum tests** — `tower::ServiceExt::oneshot` requires `tower = { version = "0.5", features = ["util"] }` as an explicit dev-dep. tower 0.5.x is already in Cargo.lock as a transitive dep of axum, so no new packages are added; but the Cargo.toml change still triggers `needs-human`.
 - **`OcpiResponse::success_empty()`** — add this constructor to `ocpi-types::envelope` rather than reaching for chrono in ocpi-server. Since ocpi-server has no direct chrono dep, constructing `OcpiResponse` directly would require either adding chrono or working around it; the clean solution is a `success_empty()` on the type itself.
+- **`#[derive(PartialOrd, Ord)]` on enums works correctly when variants are declared in the intended ordering.** Rust's auto-derived `Ord` assigns discriminants 0, 1, 2, … in declaration order. For `VersionNumber`, declaring variants `V2_0, V2_1_1, V2_2, V2_2_1, V2_3_0` means older < newer automatically. Verify declaration order before adding `Ord` to any domain enum.
+- **Extract pure helpers for async methods that have non-trivial selection logic.** `select_version(remote, supported) -> Option<&Version>` is a synchronous pure function despite `negotiate_version` being async. Testing the selection logic directly (no HTTP mocking) makes the test suite faster and more targeted.
+- **`f64` fields prevent `Eq` derivation.** Any struct containing an `f64` field (Price, EnergySource, EnvironmentalImpact, EnergyMix) can only derive `PartialEq`, not `Eq`. If downstream code or tests use `.eq()` inside a `HashMap` key or `BTreeSet`, switch those fields to a decimal representation. For now `PartialEq` is sufficient.
+- **`Vec<T>` optional arrays (cardinality `*` in OCPI): use `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.** This gives clean JSON (arrays omitted when empty) while allowing missing fields to deserialize as `vec![]` without wrapping in `Option<Vec<T>>`.
+- **Coordinate validation without a regex crate:** The OCPI `GeoLocation` regex (`-?[0-9]{1,2}\.[0-9]{5,7}`) can be validated with a small private helper that strips the optional sign, splits on `.`, and checks digit counts. Avoids the `regex` crate (which would be a new dep and trigger `needs-human`).
+- **EnergyMix and friends live in `common.rs`, not a version-specific module.** They are shared across Locations, Tariffs, and Sessions. Place them in `ocpi-types::common` and re-export from the crate root.
+- **`cargo-deny` is not pre-installed in the remote execution environment.** Skip local `deny check` and trust CI; no new dependencies in this run means deny will pass.

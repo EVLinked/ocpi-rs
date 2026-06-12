@@ -205,24 +205,206 @@ impl<'de> Deserialize<'de> for Url {
 // ── Pre-existing types ────────────────────────────────────────────────────────
 
 /// Human-readable text in a specific language (OCPI `DisplayText`).
+///
+/// Spec: `specs/ocpi/2.2.1/types.asciidoc` — DisplayText class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayText {
-    /// ISO 639-1 language code (e.g. `en`, `vi`).
+    /// ISO 639-1 language code (e.g. `en`, `vi`). Max 2 characters.
     pub language: String,
     /// The text to be displayed (max 512 characters per the spec).
     pub text: String,
 }
 
+impl DisplayText {
+    /// Validates field length constraints from the spec.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OcpiError::Invalid`] if `language` exceeds 2 characters or
+    /// `text` exceeds 512 characters.
+    pub fn validate(&self) -> Result<(), OcpiError> {
+        if self.language.len() > 2 {
+            return Err(OcpiError::Invalid(
+                "DisplayText.language must be at most 2 characters (ISO 639-1)".into(),
+            ));
+        }
+        if self.text.len() > 512 {
+            return Err(OcpiError::Invalid(format!(
+                "DisplayText.text must be at most 512 characters ({} given)",
+                self.text.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// A geographic location in decimal degrees (OCPI `GeoLocation`).
 ///
-/// Latitude and longitude are strings per the specification, formatted with a
-/// fixed decimal notation (e.g. `"51.047599"`).
+/// Latitude and longitude are strings per the specification. The geodetic
+/// system is WGS 84.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — GeoLocation class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeoLocation {
-    /// Latitude in decimal degrees, as a string.
+    /// Latitude in decimal degrees (e.g. `"50.770774"`). Max 10 chars.
     pub latitude: String,
-    /// Longitude in decimal degrees, as a string.
+    /// Longitude in decimal degrees (e.g. `"-126.104965"`). Max 11 chars.
     pub longitude: String,
+}
+
+impl GeoLocation {
+    /// Validates the coordinate format required by the spec.
+    ///
+    /// Latitude must match `-?[0-9]{1,2}\.[0-9]{5,7}` and fit in 10 chars.
+    /// Longitude must match `-?[0-9]{1,3}\.[0-9]{5,7}` and fit in 11 chars.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OcpiError::Invalid`] if either coordinate fails validation.
+    pub fn validate(&self) -> Result<(), OcpiError> {
+        if !is_valid_latitude(&self.latitude) {
+            return Err(OcpiError::Invalid(format!(
+                "GeoLocation.latitude '{}' is invalid; expected format: -?[0-9]{{1,2}}.[0-9]{{5,7}}, max 10 chars",
+                self.latitude
+            )));
+        }
+        if !is_valid_longitude(&self.longitude) {
+            return Err(OcpiError::Invalid(format!(
+                "GeoLocation.longitude '{}' is invalid; expected format: -?[0-9]{{1,3}}.[0-9]{{5,7}}, max 11 chars",
+                self.longitude
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn is_valid_coord(s: &str, max_len: usize, max_int_digits: usize) -> bool {
+    if s.len() > max_len {
+        return false;
+    }
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let Some((int_part, frac_part)) = s.split_once('.') else {
+        return false;
+    };
+    !int_part.is_empty()
+        && int_part.len() <= max_int_digits
+        && int_part.bytes().all(|b| b.is_ascii_digit())
+        && (5..=7).contains(&frac_part.len())
+        && frac_part.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_valid_latitude(s: &str) -> bool {
+    is_valid_coord(s, 10, 2)
+}
+
+fn is_valid_longitude(s: &str) -> bool {
+    is_valid_coord(s, 11, 3)
+}
+
+// ── Price ─────────────────────────────────────────────────────────────────────
+
+/// Price with and without VAT.
+///
+/// Spec: `specs/ocpi/2.2.1/types.asciidoc` — Price class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Price {
+    /// Price/cost excluding VAT.
+    pub excl_vat: f64,
+    /// Price/cost including VAT (optional).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub incl_vat: Option<f64>,
+}
+
+// ── EnergySourceCategory ──────────────────────────────────────────────────────
+
+/// Categories of energy sources.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — EnergySourceCategory enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EnergySourceCategory {
+    /// Nuclear power sources.
+    Nuclear,
+    /// All kinds of fossil power sources.
+    GeneralFossil,
+    /// Fossil power from coal.
+    Coal,
+    /// Fossil power from gas.
+    Gas,
+    /// All kinds of regenerative power sources.
+    GeneralGreen,
+    /// Regenerative power from photovoltaic panels.
+    Solar,
+    /// Regenerative power from wind turbines.
+    Wind,
+    /// Regenerative power from water turbines.
+    Water,
+}
+
+// ── EnergySource ──────────────────────────────────────────────────────────────
+
+/// A key-value pair of energy source type and its percentage in the mix.
+///
+/// All entries' `percentage` values should sum to 100.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — EnergySource class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnergySource {
+    /// The type of energy source.
+    pub source: EnergySourceCategory,
+    /// Percentage of this source (0–100) in the mix.
+    pub percentage: f64,
+}
+
+// ── EnvironmentalImpactCategory ───────────────────────────────────────────────
+
+/// Categories of environmental impact values.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — EnvironmentalImpactCategory enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EnvironmentalImpactCategory {
+    /// Produced nuclear waste in grams per kilowatthour.
+    NuclearWaste,
+    /// Exhausted carbon dioxide in grams per kilowatthour.
+    CarbonDioxide,
+}
+
+// ── EnvironmentalImpact ───────────────────────────────────────────────────────
+
+/// Amount of waste produced or emitted per kWh.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — EnvironmentalImpact class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentalImpact {
+    /// The environmental impact category of this value.
+    pub category: EnvironmentalImpactCategory,
+    /// Amount of this portion in grams per kilowatthour.
+    pub amount: f64,
+}
+
+// ── EnergyMix ─────────────────────────────────────────────────────────────────
+
+/// Energy mix and environmental impact of the energy supplied at a location or
+/// in a tariff.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — EnergyMix class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnergyMix {
+    /// True if 100% from regenerative sources (CO₂ and nuclear waste are zero).
+    pub is_green_energy: bool,
+    /// Energy sources making up this mix. Percentages should sum to 100.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub energy_sources: Vec<EnergySource>,
+    /// Nuclear waste and CO₂ exhaust values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environ_impact: Vec<EnvironmentalImpact>,
+    /// Name of the energy supplier (max 64 chars).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub supplier_name: Option<String>,
+    /// Name of the energy supplier's product or tariff plan (max 64 chars).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub energy_product_name: Option<String>,
 }
 
 /// Logo / image reference (OCPI `Image`).
@@ -385,5 +567,272 @@ mod tests {
     fn url_serde_rejects_too_long() {
         let long = format!("\"https://{}\"", "a".repeat(250));
         assert!(serde_json::from_str::<Url>(&long).is_err());
+    }
+
+    // ── DisplayText::validate ──
+
+    #[test]
+    fn display_text_validate_accepts_valid() {
+        let dt = DisplayText {
+            language: "en".into(),
+            text: "Hello".into(),
+        };
+        assert!(dt.validate().is_ok());
+    }
+
+    #[test]
+    fn display_text_validate_rejects_long_language() {
+        let dt = DisplayText {
+            language: "eng".into(),
+            text: "Hello".into(),
+        };
+        let err = dt.validate().unwrap_err();
+        assert!(matches!(err, OcpiError::Invalid(_)));
+    }
+
+    #[test]
+    fn display_text_validate_rejects_long_text() {
+        let dt = DisplayText {
+            language: "en".into(),
+            text: "x".repeat(513),
+        };
+        let err = dt.validate().unwrap_err();
+        assert!(matches!(err, OcpiError::Invalid(_)));
+    }
+
+    #[test]
+    fn display_text_validate_accepts_512_char_text() {
+        let dt = DisplayText {
+            language: "vi".into(),
+            text: "x".repeat(512),
+        };
+        assert!(dt.validate().is_ok());
+    }
+
+    // ── GeoLocation::validate ──
+
+    #[test]
+    fn geo_location_validate_accepts_valid() {
+        let g = GeoLocation {
+            latitude: "50.770774".into(),
+            longitude: "-126.104965".into(),
+        };
+        assert!(g.validate().is_ok());
+    }
+
+    #[test]
+    fn geo_location_validate_accepts_positive_longitude() {
+        let g = GeoLocation {
+            latitude: "51.047599".into(),
+            longitude: "3.729596".into(),
+        };
+        assert!(g.validate().is_ok());
+    }
+
+    #[test]
+    fn geo_location_validate_rejects_bad_latitude_few_decimals() {
+        let g = GeoLocation {
+            latitude: "50.7707".into(), // only 4 decimal places — need ≥5
+            longitude: "3.729596".into(),
+        };
+        assert!(g.validate().is_err());
+    }
+
+    #[test]
+    fn geo_location_validate_rejects_bad_latitude_no_dot() {
+        let g = GeoLocation {
+            latitude: "50770774".into(),
+            longitude: "3.729596".into(),
+        };
+        assert!(g.validate().is_err());
+    }
+
+    #[test]
+    fn geo_location_validate_rejects_latitude_too_long() {
+        // 11 chars — exceeds max 10
+        let g = GeoLocation {
+            latitude: "50.7707741".into(),
+            longitude: "3.729596".into(),
+        };
+        // "50.7707741" is 10 chars, borderline OK
+        assert!(g.validate().is_ok());
+        let g2 = GeoLocation {
+            latitude: "50.77077411".into(), // 11 chars
+            longitude: "3.729596".into(),
+        };
+        assert!(g2.validate().is_err());
+    }
+
+    #[test]
+    fn geo_location_validate_rejects_bad_longitude_too_many_int_digits() {
+        // longitude int part max 3 digits
+        let g = GeoLocation {
+            latitude: "50.770774".into(),
+            longitude: "1234.729596".into(), // 4 int digits
+        };
+        assert!(g.validate().is_err());
+    }
+
+    // ── Price ──
+
+    #[test]
+    fn price_roundtrip_with_incl_vat() {
+        let p = Price {
+            excl_vat: 4.0,
+            incl_vat: Some(4.84),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Price = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn price_roundtrip_excl_only() {
+        let p = Price {
+            excl_vat: 2.5,
+            incl_vat: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("incl_vat"));
+        let back: Price = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn price_deserializes_from_spec_values() {
+        let json = r#"{"excl_vat": 4.0, "incl_vat": 4.84}"#;
+        let p: Price = serde_json::from_str(json).unwrap();
+        assert!((p.excl_vat - 4.0).abs() < f64::EPSILON);
+        assert!((p.incl_vat.unwrap() - 4.84).abs() < 1e-9);
+    }
+
+    // ── EnergySourceCategory ──
+
+    #[test]
+    fn energy_source_category_serializes_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&EnergySourceCategory::GeneralFossil).unwrap(),
+            "\"GENERAL_FOSSIL\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnergySourceCategory::GeneralGreen).unwrap(),
+            "\"GENERAL_GREEN\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnergySourceCategory::Nuclear).unwrap(),
+            "\"NUCLEAR\""
+        );
+    }
+
+    #[test]
+    fn energy_source_category_roundtrip() {
+        for cat in [
+            EnergySourceCategory::Nuclear,
+            EnergySourceCategory::GeneralFossil,
+            EnergySourceCategory::Coal,
+            EnergySourceCategory::Gas,
+            EnergySourceCategory::GeneralGreen,
+            EnergySourceCategory::Solar,
+            EnergySourceCategory::Wind,
+            EnergySourceCategory::Water,
+        ] {
+            let json = serde_json::to_string(&cat).unwrap();
+            let back: EnergySourceCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cat);
+        }
+    }
+
+    // ── EnergySource ──
+
+    #[test]
+    fn energy_source_roundtrip() {
+        let es = EnergySource {
+            source: EnergySourceCategory::Solar,
+            percentage: 45.0,
+        };
+        let json = serde_json::to_string(&es).unwrap();
+        let back: EnergySource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, es);
+    }
+
+    // ── EnvironmentalImpactCategory ──
+
+    #[test]
+    fn environmental_impact_category_serializes_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&EnvironmentalImpactCategory::NuclearWaste).unwrap(),
+            "\"NUCLEAR_WASTE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnvironmentalImpactCategory::CarbonDioxide).unwrap(),
+            "\"CARBON_DIOXIDE\""
+        );
+    }
+
+    // ── EnvironmentalImpact ──
+
+    #[test]
+    fn environmental_impact_roundtrip() {
+        let ei = EnvironmentalImpact {
+            category: EnvironmentalImpactCategory::CarbonDioxide,
+            amount: 372.0,
+        };
+        let json = serde_json::to_string(&ei).unwrap();
+        let back: EnvironmentalImpact = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ei);
+    }
+
+    // ── EnergyMix ──
+
+    #[test]
+    fn energy_mix_simple_green_roundtrip() {
+        let m = EnergyMix {
+            is_green_energy: true,
+            energy_sources: vec![],
+            environ_impact: vec![],
+            supplier_name: None,
+            energy_product_name: None,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("energy_sources"));
+        assert!(!json.contains("environ_impact"));
+        let back: EnergyMix = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn energy_mix_complete_roundtrip() {
+        let m = EnergyMix {
+            is_green_energy: false,
+            energy_sources: vec![
+                EnergySource {
+                    source: EnergySourceCategory::Wind,
+                    percentage: 70.0,
+                },
+                EnergySource {
+                    source: EnergySourceCategory::Solar,
+                    percentage: 30.0,
+                },
+            ],
+            environ_impact: vec![EnvironmentalImpact {
+                category: EnvironmentalImpactCategory::CarbonDioxide,
+                amount: 10.3,
+            }],
+            supplier_name: Some("Green Power Co.".into()),
+            energy_product_name: Some("Wind100".into()),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: EnergyMix = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn energy_mix_missing_optional_arrays_deserialize_as_empty() {
+        let json = r#"{"is_green_energy": true}"#;
+        let m: EnergyMix = serde_json::from_str(json).unwrap();
+        assert!(m.energy_sources.is_empty());
+        assert!(m.environ_impact.is_empty());
+        assert!(m.supplier_name.is_none());
+        assert!(m.energy_product_name.is_none());
     }
 }

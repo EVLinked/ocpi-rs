@@ -68,11 +68,38 @@ impl CredentialToken {
     /// Expects the format `Token <base64>`. Returns `None` if the prefix
     /// is absent, the Base64 is invalid, or the decoded bytes are not valid
     /// UTF-8.
+    ///
+    /// Use [`Self::from_header_value_lenient`] when interoperating with OCPI
+    /// 2.1.1/2.2 peers that do not Base64-encode the token.
     pub fn from_header_value(value: &str) -> Option<Self> {
         let encoded = value.strip_prefix("Token ")?;
         let bytes = B64.decode(encoded.trim()).ok()?;
         let raw = String::from_utf8(bytes).ok()?;
         Some(Self(raw))
+    }
+
+    /// Parse the raw token from an `Authorization` header value, accepting
+    /// both Base64-encoded (OCPI 2.2.1) and raw (OCPI 2.1.1/2.2) forms.
+    ///
+    /// Tries Base64-decode first. If that yields valid UTF-8, the decoded
+    /// string is used. Otherwise the part after `"Token "` is treated as a
+    /// raw (plaintext) token.
+    ///
+    /// # Caveats
+    ///
+    /// A raw token that is coincidentally valid Base64 will be decoded
+    /// incorrectly. This ambiguity is inherent to the "trial-and-error"
+    /// approach documented in the OCPI 2.2.1 spec note (§ Authorization header).
+    /// Use [`Self::from_header_value`] (strict) when you control both sides.
+    pub fn from_header_value_lenient(value: &str) -> Option<Self> {
+        let tail = value.strip_prefix("Token ")?;
+        let trimmed = tail.trim();
+        if let Ok(bytes) = B64.decode(trimmed) {
+            if let Ok(raw) = String::from_utf8(bytes) {
+                return Some(Self(raw));
+            }
+        }
+        Some(Self(trimmed.to_owned()))
     }
 }
 
@@ -227,6 +254,35 @@ mod tests {
     #[test]
     fn credential_token_wrong_scheme_is_none() {
         assert!(CredentialToken::from_header_value("Bearer abc").is_none());
+    }
+
+    // ── CredentialToken::from_header_value_lenient ──
+
+    #[test]
+    fn lenient_accepts_base64_encoded_token() {
+        // "example-token" → Base64 → should round-trip via lenient parser
+        let token = CredentialToken::new("example-token");
+        let header = token.to_header_value();
+        let parsed = CredentialToken::from_header_value_lenient(&header).expect("lenient parse");
+        assert_eq!(parsed.as_str(), "example-token");
+    }
+
+    #[test]
+    fn lenient_accepts_raw_token_that_is_not_base64() {
+        // "my!!token" contains '!' which is not a Base64 character → treated as raw
+        let header = "Token my!!token";
+        let parsed = CredentialToken::from_header_value_lenient(header).expect("lenient parse");
+        assert_eq!(parsed.as_str(), "my!!token");
+    }
+
+    #[test]
+    fn lenient_wrong_scheme_is_none() {
+        assert!(CredentialToken::from_header_value_lenient("Bearer abc").is_none());
+    }
+
+    #[test]
+    fn lenient_missing_prefix_is_none() {
+        assert!(CredentialToken::from_header_value_lenient("ZXhhbXBsZS10b2tlbg==").is_none());
     }
 
     // ── parse_next_link ──

@@ -5,6 +5,69 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-11 (run 3) — M1: common data types — Price, EnergyMix, GeoLocation/DisplayText validation (issue #7)
+
+- **Issue:** #7 — M1: Expand common data types (Price, EnergyMix, Tariff primitives)
+- **Branch:** `claude/amazing-shannon-tr85pl`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (117 tests, +21 new) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - `Price` struct: `excl_vat: f64`, `incl_vat: Option<f64>` — per `types.asciidoc`
+  - `EnergySourceCategory` enum (8 variants: NUCLEAR, GENERAL_FOSSIL, COAL, GAS, GENERAL_GREEN, SOLAR, WIND, WATER)
+  - `EnergySource` struct: `source: EnergySourceCategory`, `percentage: f64`
+  - `EnvironmentalImpactCategory` enum (NUCLEAR_WASTE, CARBON_DIOXIDE)
+  - `EnvironmentalImpact` struct: `category`, `amount: f64`
+  - `EnergyMix` struct with optional Vec arrays (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`)
+  - `GeoLocation::validate()` — latitude/longitude regex check without external deps
+  - `DisplayText::validate()` — language ≤2 chars, text ≤512 chars
+  - All new types re-exported from `ocpi-types` crate root
+  - 21 new tests: roundtrips, SCREAMING_SNAKE_CASE serde, validate edge cases
+- **No Cargo.toml changes.** (No `needs-human` flag.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) still open, `needs-human`. CI ✅, no review comments.
+- **f64 / Eq note:** `Price`, `EnergySource`, `EnvironmentalImpact`, and `EnergyMix` only derive `PartialEq` (not `Eq`) because `f64: !Eq`. Pure enum/string types keep full `Eq + Hash`.
+- **GeoLocation validation implementation:** manual coordinate check (`is_valid_coord` private helper) rather than pulling in the `regex` crate — keeps zero new deps.
+- **Next:** #23 (M2 end-to-end smoke test) — still blocked on #24 merging. Alternatively start M3 (Locations module) grooming if #24 stays open; #12/#13 (CI/security .github/ touches → `needs-human`) are also viable picks.
+
+---
+
+## 2026-06-11 (run 2) — M1: Authorization header Base64-encode (issue #17)
+
+- **Issue:** #17 — M1: `ocpi-client` Authorization header — Base64-encode token per OCPI 2.2.1 spec
+- **Branch:** `nightly/2026-06-11-issue-17`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (96 tests, +8 new) `deny check` ✅ (pre-existing warnings only)
+- **What shipped:**
+  - `ocpi-types::transport::CredentialToken` — new `from_header_value_lenient()` method: tries Base64 decode first, falls back to raw string for legacy 2.1.1/2.2 peers. Strict `from_header_value()` unchanged.
+  - 4 new tests for `from_header_value_lenient` in `ocpi-types`
+  - `ocpi-client::OcpiClient` — added `compat_raw_token: bool` field (default `false` = Base64 per OCPI 2.2.1); `with_compat_raw_token(bool) -> Self` builder; private `auth_header_value()` helper; all 5 outbound request methods updated to use the helper
+  - 4 new tests in `ocpi-client`: default encodes, compat sends raw, builder preserves fields, default-false
+- **No Cargo.toml changes.** (No `needs-human` flag.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) still open, `needs-human`. CI ✅, no review comments.
+- **Known gap:** PR #24's credential router uses strict `from_header_value()`. Once merged, a follow-up should update it to `from_header_value_lenient()` for backward-compat server-side handling.
+- **What worked:** Using `CredentialToken` from `ocpi-types` in the client (already a dep) kept this zero-dependency-change. The builder pattern (`with_compat_raw_token`) is ergonomic and non-breaking.
+- **Next:** #23 (M2 end-to-end smoke test) — blocked on PR #24 merging. While waiting: #7 (common data types: Price, EnergyMix) or #12/#13 (CI/security, touch `.github/` → `needs-human`). Suggest #7 next.
+
+---
+
+## 2026-06-11 — M2 version negotiation helper (issue #19)
+
+- **Issue:** #19 — M2: `OcpiClient::negotiate_version` — select best shared OCPI version
+- **Branch:** `nightly/2026-06-11-issue-19`
+- **PR:** (opened this run)
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (88 tests, +13 new) `deny check` ✅ (expected — no new deps)
+- **What shipped:**
+  - `ocpi-types::version::VersionNumber` — added `PartialOrd + Ord` derive (enum variants declared in ascending version order, so auto-derive is correct: V2_0 < V2_1_1 < V2_2 < V2_2_1 < V2_3_0)
+  - `ocpi-types::version` — 1 new test: `version_number_ord_ascending_order`
+  - `ocpi-client::error::ClientError::NoMutualVersion` — new variant with descriptive message; maps to OCPI `3002 UnsupportedVersion` conceptually
+  - `ocpi-client` — private `select_version(remote, supported) -> Option<&Version>` pure helper (no HTTP; easily testable); `OcpiClient::negotiate_version(&[VersionNumber]) -> Result<VersionDetails, ClientError>` async method
+  - 12 new tests in `ocpi-client`: 6 for `select_version`, 2 for `VersionNumber` ordering, 1 for `NoMutualVersion` display, 3 pre-existing client tests
+- **No Cargo.toml changes.** (No `needs-human` flag required.)
+- **Sync note:** PR #24 (issue #22 — credentials axum router) was already open with green CI; no fixing needed tonight.
+- **What worked:** Extracting `select_version` as a pure function kept the tests fast (no HTTP mocking needed), and `#[derive(PartialOrd, Ord)]` just worked because the enum variants are in the right declaration order.
+- **Next:** #23 (M2 end-to-end smoke test, P2) — depends on PR #24 merging first. While waiting, #17 (Authorization header Base64-encode, P2) or #7 (common data types: Price, EnergyMix). Suggest #17 — it unblocks correct interop for the entire M2 handshake.
+
+---
+
 ## 2026-06-11 — M2 credentials axum router (issue #22)
 
 - **Issue:** #22 — M2: credentials axum router — `credentials_router()` with concrete `CredentialsConfig`

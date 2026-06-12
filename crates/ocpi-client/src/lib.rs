@@ -14,39 +14,82 @@ mod error;
 pub use error::ClientError;
 
 use ocpi_types::{
+    transport::CredentialToken,
     v2_2_1::Credentials,
-    version::{Version, VersionDetails},
+    version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
 use url::Url;
+
+/// Select the best common version from `remote` given `supported` local versions.
+///
+/// Picks the entry with the highest [`VersionNumber`] that also appears in
+/// `supported`, or `None` if there is no overlap.
+fn select_version<'a>(remote: &'a [Version], supported: &[VersionNumber]) -> Option<&'a Version> {
+    remote
+        .iter()
+        .filter(|v| supported.contains(&v.version))
+        .max_by_key(|v| v.version)
+}
 
 /// A configured OCPI client pointed at one remote party's API base URL.
 ///
 /// The `base_url` should be the versioned module base (it is joined with
 /// relative paths like `versions`), and `token` is the OCPI authorization
 /// token presented as `Authorization: Token <token>`.
+///
+/// By default the token is Base64-encoded per OCPI 2.2.1 §4.1.1.
+/// Set `compat_raw_token = true` (via [`Self::with_compat_raw_token`]) to send
+/// the raw token instead, for interoperability with OCPI 2.1.1/2.2 peers.
 #[derive(Debug, Clone)]
 pub struct OcpiClient {
     base_url: Url,
     token: String,
     http: reqwest::Client,
+    /// When `true`, the token is sent raw (not Base64-encoded).
+    /// Use only when connecting to legacy 2.1.1/2.2 peers.
+    compat_raw_token: bool,
 }
 
 impl OcpiClient {
     /// Create a client targeting `base_url`, authenticating with `token`.
+    ///
+    /// Token encoding defaults to Base64 (OCPI 2.2.1). Use
+    /// [`Self::with_compat_raw_token`] to opt into the raw-token mode for
+    /// legacy peers.
     #[must_use]
     pub fn new(base_url: Url, token: impl Into<String>) -> Self {
         Self {
             base_url,
             token: token.into(),
             http: reqwest::Client::new(),
+            compat_raw_token: false,
         }
+    }
+
+    /// Override the token encoding mode.
+    ///
+    /// - `false` (default): token is Base64-encoded per OCPI 2.2.1.
+    /// - `true`: token is sent raw; use with legacy 2.1.1/2.2 peers.
+    #[must_use]
+    pub fn with_compat_raw_token(mut self, compat: bool) -> Self {
+        self.compat_raw_token = compat;
+        self
     }
 
     /// The configured base URL.
     #[must_use]
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// Build the `Authorization` header value for outbound requests.
+    fn auth_header_value(&self) -> String {
+        if self.compat_raw_token {
+            format!("Token {}", self.token)
+        } else {
+            CredentialToken::new(&self.token).to_header_value()
+        }
     }
 
     /// Fetch the remote party's supported versions (`GET /versions`).
@@ -60,7 +103,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(url)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -82,7 +125,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -104,7 +147,7 @@ impl OcpiClient {
         let response = self
             .http
             .get(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -130,7 +173,7 @@ impl OcpiClient {
         let response = self
             .http
             .post(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .json(credentials)
             .send()
             .await?
@@ -156,13 +199,35 @@ impl OcpiClient {
         let response = self
             .http
             .put(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .json(credentials)
             .send()
             .await?
             .error_for_status()?;
         let envelope: OcpiResponse<Credentials> = response.json().await?;
         envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Perform the two-step OCPI version bootstrap.
+    ///
+    /// 1. `GET /versions` — fetch the remote party's supported versions.
+    /// 2. Intersect with `supported` (this party's versions); pick the highest.
+    /// 3. `GET <version-url>` — return the selected version's [`VersionDetails`].
+    ///
+    /// Version priority (highest wins): `V2_3_0 > V2_2_1 > V2_2 > V2_1_1 > V2_0`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NoMutualVersion`] if no version is supported by both parties.
+    /// - [`ClientError::Http`] if a request fails.
+    /// - [`ClientError::EmptyData`] if a response envelope carries no data.
+    pub async fn negotiate_version(
+        &self,
+        supported: &[VersionNumber],
+    ) -> Result<VersionDetails, ClientError> {
+        let remote = self.versions().await?;
+        let best = select_version(&remote, supported).ok_or(ClientError::NoMutualVersion)?;
+        self.version_details(best.url.as_str()).await
     }
 
     /// Unregister from the remote party (`DELETE <url>`).
@@ -177,7 +242,7 @@ impl OcpiClient {
         let parsed = url::Url::parse(url)?;
         self.http
             .delete(parsed)
-            .header("Authorization", format!("Token {}", self.token))
+            .header("Authorization", self.auth_header_value())
             .send()
             .await?
             .error_for_status()?;
@@ -187,8 +252,111 @@ impl OcpiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::OcpiClient;
+    use super::{select_version, OcpiClient};
+    use ocpi_types::{
+        common::Url as OcpiUrl,
+        version::{Version, VersionNumber},
+    };
     use url::Url;
+
+    fn make_version(v: VersionNumber, url: &str) -> Version {
+        Version {
+            version: v,
+            url: OcpiUrl::try_from(url).unwrap(),
+        }
+    }
+
+    // ── select_version ────────────────────────────────────────────────────────
+
+    #[test]
+    fn select_version_picks_highest_common() {
+        let remote = vec![
+            make_version(VersionNumber::V2_1_1, "https://example.com/2.1.1"),
+            make_version(VersionNumber::V2_2_1, "https://example.com/2.2.1"),
+        ];
+        let supported = [VersionNumber::V2_1_1, VersionNumber::V2_2_1];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2_1);
+    }
+
+    #[test]
+    fn select_version_no_overlap_returns_none() {
+        let remote = vec![make_version(VersionNumber::V2_0, "https://example.com/2.0")];
+        let supported = [VersionNumber::V2_2_1, VersionNumber::V2_3_0];
+        assert!(select_version(&remote, &supported).is_none());
+    }
+
+    #[test]
+    fn select_version_single_overlap() {
+        let remote = vec![
+            make_version(VersionNumber::V2_0, "https://example.com/2.0"),
+            make_version(VersionNumber::V2_2_1, "https://example.com/2.2.1"),
+        ];
+        let supported = [VersionNumber::V2_2_1];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2_1);
+    }
+
+    #[test]
+    fn select_version_remote_subset_of_supported() {
+        // Remote only supports older versions; we pick the highest the remote has.
+        let remote = vec![
+            make_version(VersionNumber::V2_1_1, "https://example.com/2.1.1"),
+            make_version(VersionNumber::V2_2, "https://example.com/2.2"),
+        ];
+        let supported = [
+            VersionNumber::V2_1_1,
+            VersionNumber::V2_2,
+            VersionNumber::V2_2_1,
+            VersionNumber::V2_3_0,
+        ];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_2);
+    }
+
+    #[test]
+    fn select_version_empty_remote_returns_none() {
+        assert!(select_version(&[], &[VersionNumber::V2_2_1]).is_none());
+    }
+
+    #[test]
+    fn select_version_single_both_sides() {
+        let remote = vec![make_version(
+            VersionNumber::V2_3_0,
+            "https://example.com/2.3.0",
+        )];
+        let supported = [VersionNumber::V2_3_0];
+        let picked = select_version(&remote, &supported).unwrap();
+        assert_eq!(picked.version, VersionNumber::V2_3_0);
+        assert_eq!(picked.url.as_str(), "https://example.com/2.3.0");
+    }
+
+    // ── VersionNumber ordering ────────────────────────────────────────────────
+
+    #[test]
+    fn version_number_ord_ascending() {
+        assert!(VersionNumber::V2_0 < VersionNumber::V2_1_1);
+        assert!(VersionNumber::V2_1_1 < VersionNumber::V2_2);
+        assert!(VersionNumber::V2_2 < VersionNumber::V2_2_1);
+        assert!(VersionNumber::V2_2_1 < VersionNumber::V2_3_0);
+    }
+
+    #[test]
+    fn version_number_max_is_v2_3_0() {
+        let versions = [
+            VersionNumber::V2_0,
+            VersionNumber::V2_1_1,
+            VersionNumber::V2_2,
+            VersionNumber::V2_2_1,
+            VersionNumber::V2_3_0,
+        ];
+        assert_eq!(
+            versions.iter().copied().max().unwrap(),
+            VersionNumber::V2_3_0
+        );
+    }
+
+    // ── OcpiClient ────────────────────────────────────────────────────────────
 
     #[test]
     fn builds_client_with_base_url() {
@@ -218,5 +386,36 @@ mod tests {
         // url crate may or may not parse this; what matters is the client
         // would propagate the error. We just confirm the parse path exists.
         let _ = result;
+    }
+
+    // ── Authorization header encoding ─────────────────────────────────────────
+
+    #[test]
+    fn default_client_sends_base64_encoded_token() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "my-raw-token");
+        let header = client.auth_header_value();
+        // "my-raw-token" in Base64 (RFC 4648 standard alphabet) = "bXktcmF3LXRva2Vu"
+        assert_eq!(header, "Token bXktcmF3LXRva2Vu");
+    }
+
+    #[test]
+    fn compat_client_sends_raw_token() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "my-raw-token")
+            .with_compat_raw_token(true);
+        assert_eq!(client.auth_header_value(), "Token my-raw-token");
+    }
+
+    #[test]
+    fn compat_builder_preserves_other_fields() {
+        let base = Url::parse("https://example.com/ocpi/").unwrap();
+        let client = OcpiClient::new(base.clone(), "tok").with_compat_raw_token(true);
+        assert_eq!(client.base_url(), &base);
+        assert!(client.compat_raw_token);
+    }
+
+    #[test]
+    fn compat_false_is_default() {
+        let client = OcpiClient::new(Url::parse("https://example.com/").unwrap(), "tok");
+        assert!(!client.compat_raw_token);
     }
 }
