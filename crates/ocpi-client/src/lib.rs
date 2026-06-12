@@ -14,8 +14,8 @@ mod error;
 pub use error::ClientError;
 
 use ocpi_types::{
-    transport::CredentialToken,
-    v2_2_1::Credentials,
+    transport::{CredentialToken, PaginationMeta},
+    v2_2_1::{ChargingPreferences, ChargingPreferencesResponse, Credentials, Session},
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
@@ -247,6 +247,223 @@ impl OcpiClient {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    // ── Sessions ──────────────────────────────────────────────────────────────
+
+    /// Fetch a paginated list of sessions from the remote CPO (`GET <url>`).
+    ///
+    /// `url` is the absolute URL of the remote sessions endpoint. The query
+    /// parameters `date_from`, `date_to`, `offset`, and `limit` may be set
+    /// in the `params` argument; `None` fields are omitted from the query
+    /// string.
+    ///
+    /// Returns `(sessions, pagination_meta)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails, the URL is invalid, or
+    /// the envelope carries no data.
+    pub async fn get_sessions(
+        &self,
+        url: &str,
+        params: &ocpi_types::transport::PaginatedParams,
+    ) -> Result<(Vec<Session>, PaginationMeta), ClientError> {
+        let mut req = self
+            .http
+            .get(url::Url::parse(url)?)
+            .header("Authorization", self.auth_header_value());
+        if let Some(df) = params.date_from {
+            req = req.query(&[("date_from", df.to_rfc3339())]);
+        }
+        if let Some(dt) = params.date_to {
+            req = req.query(&[("date_to", dt.to_rfc3339())]);
+        }
+        if let Some(off) = params.offset {
+            req = req.query(&[("offset", off.to_string())]);
+        }
+        if let Some(lim) = params.limit {
+            req = req.query(&[("limit", lim.to_string())]);
+        }
+        let response = req.send().await?.error_for_status()?;
+
+        let link = response
+            .headers()
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| {
+                // Parse: `<url>; rel="next"`
+                let url_part = s.trim().strip_prefix('<')?.split('>').next()?;
+                Some(url_part.to_string())
+            });
+        let total_count: u64 = response
+            .headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let page_limit: u32 = response
+            .headers()
+            .get("x-limit")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(params.limit.unwrap_or(50));
+
+        let meta = PaginationMeta {
+            next_url: link,
+            total_count,
+            limit: page_limit,
+        };
+
+        let envelope: OcpiResponse<Vec<Session>> = response.json().await?;
+        let sessions = envelope.data.ok_or(ClientError::EmptyData)?;
+        Ok((sessions, meta))
+    }
+
+    /// Retrieve a single session by its composite key (`GET <url>/{cc}/{party}/{id}`).
+    ///
+    /// `url` is the sessions endpoint base; the path segments are appended
+    /// automatically.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NotFound`] when the server returns OCPI `2003` or HTTP
+    ///   404.
+    /// - [`ClientError::EmptyData`] if the success envelope carries no data.
+    pub async fn get_session(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        session_id: &str,
+    ) -> Result<Session, ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            session_id,
+        );
+        let response = self
+            .http
+            .get(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        let response = response.error_for_status()?;
+        let envelope: OcpiResponse<Session> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Create or replace a session on the remote eMSP (`PUT`).
+    ///
+    /// `url` is the sessions endpoint base; the path segments are appended
+    /// automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn put_session(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        session_id: &str,
+        session: &Session,
+    ) -> Result<(), ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            session_id,
+        );
+        self.http
+            .put(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .json(session)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Apply a partial update (JSON merge-patch, RFC 7396) to a session
+    /// on the remote eMSP (`PATCH`).
+    ///
+    /// `partial` is any `Serialize` value; use a struct with
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` fields, or a
+    /// `serde_json::Value` map, to send only the changed fields.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::NotFound`] when the server returns HTTP 404.
+    /// - [`ClientError::Http`] on network or server errors.
+    pub async fn patch_session<T: ocpi_types::serde::Serialize>(
+        &self,
+        url: &str,
+        country_code: &str,
+        party_id: &str,
+        session_id: &str,
+        partial: &T,
+    ) -> Result<(), ClientError> {
+        let endpoint = format!(
+            "{}/{}/{}/{}",
+            url.trim_end_matches('/'),
+            country_code,
+            party_id,
+            session_id,
+        );
+        let response = self
+            .http
+            .patch(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .json(partial)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        response.error_for_status()?;
+        Ok(())
+    }
+
+    /// Send the driver's charging preferences to the CPO for the given
+    /// session (`PUT /sessions/{session_id}/charging_preferences`).
+    ///
+    /// `url` is the sessions endpoint base; the path is appended automatically
+    /// as `/{session_id}/charging_preferences`.
+    ///
+    /// Returns the CPO's [`ChargingPreferencesResponse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails, the URL is invalid, or
+    /// the envelope carries no data.
+    pub async fn set_charging_preferences(
+        &self,
+        url: &str,
+        session_id: &str,
+        preferences: &ChargingPreferences,
+    ) -> Result<ChargingPreferencesResponse, ClientError> {
+        let endpoint = format!(
+            "{}/{}/charging_preferences",
+            url.trim_end_matches('/'),
+            session_id,
+        );
+        let response = self
+            .http
+            .put(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .json(preferences)
+            .send()
+            .await?
+            .error_for_status()?;
+        let envelope: OcpiResponse<ChargingPreferencesResponse> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
     }
 }
 

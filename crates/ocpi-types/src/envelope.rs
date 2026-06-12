@@ -53,6 +53,20 @@ impl<T> OcpiResponse<T> {
         }
     }
 
+    /// Build a successful response (`status_code = 1000`) with no data payload.
+    ///
+    /// Use this for mutations (PUT, PATCH, DELETE) where the spec requires
+    /// `status_code = 1000` but no `data` field in the response body.
+    #[must_use]
+    pub fn success_empty() -> Self {
+        Self {
+            data: None,
+            status_code: OcpiStatusCode::Success,
+            status_message: None,
+            timestamp: Utc::now(),
+        }
+    }
+
     /// Build an error response with the given status code and message.
     #[must_use]
     pub fn error(code: OcpiStatusCode, message: impl Into<String>) -> Self {
@@ -222,5 +236,19 @@ mod tests {
         let resp = page.into_response();
         assert!(resp.is_success());
         assert_eq!(resp.data, Some(vec![1, 2, 3]));
+    }
+
+    // --- OcpiResponse::success_empty ------------------------------------------
+
+    #[test]
+    fn success_empty_has_no_data_field() {
+        let resp: OcpiResponse<u32> = OcpiResponse::success_empty();
+        assert!(resp.is_success());
+        assert_eq!(resp.status_code, OcpiStatusCode::Success);
+        assert!(resp.data.is_none());
+        // Serialised JSON must omit the "data" field.
+        let json = serde_json::to_string(&resp).expect("serialize");
+        assert!(!json.contains("\"data\""), "data should be absent: {json}");
+        assert!(json.contains("\"status_code\":1000"), "got: {json}");
     }
 }
