@@ -5,6 +5,21 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 6) — fix: MSRV bump 1.85 → 1.86 (icu_* v2.2.0 CI failure on PR #31)
+
+- **Issue:** CI follow-up — PR #31 `msrv (1.85)` check failed because `icu_collections/icu_locale_core/icu_normalizer/icu_properties/icu_provider/idna_adapter v2.2.0` all declare `rust-version = "1.86"`. Run 5 set MSRV to 1.85 but that was still one short.
+- **Branch:** `claude/amazing-shannon-7fc885` (same branch as PR #31)
+- **PR:** #31 (fixed in-place — additional commit to same branch)
+- **CI fix:**
+  - `Cargo.toml` `[workspace.package] rust-version`: `"1.85"` → `"1.86"`
+  - `.github/workflows/ci.yml` msrv job: name `msrv (1.85)` → `msrv (1.86)`, toolchain `@1.85.0` → `@1.86.0`
+- **Root cause:** `icu4x`/`icu_*` v2.2.0 requires Rust edition 2024 features available in 1.86. These are transitive deps via `reqwest → hyper → h3 → quinn → rustls → idna → idna_adapter → icu_*`. The dep resolver locked to v2.2.0 when run 4 ran.
+- **LEARNINGS.md:** Added `icu_* v2.2.0 requires 1.86` note to complement the existing `clap_lex 1.85` entry.
+- **needs-human:** YES — diff still touches `.github/`; `needs-human` label preserved.
+- **Next:** After PR #31 merges, pick up #29 (M3: Locations server handler + axum `locations_router()`, P1). Then #30 (Locations client methods, P2).
+
+---
+
 ## 2026-06-11 (run 5) — CI: calibrate MSRV to 1.85 (issue #12)
 
 - **Issue:** #12 — CI: calibrate or remove the MSRV (1.82) job
