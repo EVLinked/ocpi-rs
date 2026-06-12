@@ -5,6 +5,22 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 — Maintenance: PR #24 dirty state fix + M2/M4 grooming
+
+- **Issue:** N/A (maintenance + grooming night — at 2-PR limit)
+- **Branch:** `claude/amazing-shannon-07wyfr`
+- **PR:** None opened tonight. Open PRs: #24 (`needs-human`, credentials axum router) and #31 (`needs-human`, Locations types + MSRV). Both CI green; neither had review comments.
+- **CI:** local `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (132 tests on `nightly/2026-06-11-issue-22` post-merge)
+- **What happened:**
+  - **PR #24 dirty state:** merged latest `main` (54ec765) into `nightly/2026-06-11-issue-22`. Conflicts were doc-only (JOURNAL.md + LEARNINGS.md — both sides added new entries). Resolved by keeping all entries in newest-first order. All 132 tests pass. Pushed. Commented on PR #24 with context.
+  - **PR #31:** all 12 CI checks green, no review comments. Nothing to fix.
+  - **Groomed M2:** created #33 (credentials fetch-back — server calls client /versions during POST/PUT; deferred from PR #24; P1).
+  - **Groomed M4 (Sessions + CDRs):** created #34 (Sessions data types, P1), #35 (CDR data types, P1), #36 (Sessions server + client, P2), #37 (CDRs server + client, P2).
+- **2-PR limit hit:** Both #24 and #31 are open `needs-human` nightly PRs. Could not implement and ship a 3rd PR tonight.
+- **Next:** #29 (Locations server handler, P1) — highest priority once PR #31 (#28 Locations types) merges. Alternatively #33 (credentials fetch-back) if PR #24 merges first.
+
+---
+
 ## 2026-06-11 (run 3) — M1: common data types — Price, EnergyMix, GeoLocation/DisplayText validation (issue #7)
 
 - **Issue:** #7 — M1: Expand common data types (Price, EnergyMix, Tariff primitives)
