@@ -5,6 +5,27 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 — M4: CDRs server handler + axum router + client methods (issue #37)
+
+- **Issue:** #37 — `CdrsHandler` trait, `CdrsConfig` (RwLock store, base_url for Location header), `cdrs_router()`, 3 client methods (`get_cdrs`, `get_cdr`, `post_cdr`)
+- **Branch:** `claude/sweet-hopper-7u87a3`
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (165+ tests, +6 new in ocpi-server) `deny check` ✅ (no new deps)
+- **What shipped:**
+  - `CdrsHandler` trait (sender GET list/single + receiver POST) — `async_fn_in_trait` + `#[allow]`
+  - `CdrsConfig`: `RwLock<HashMap<String, Cdr>>` keyed by CDR `id`; `new(base_url)`, `store(cdr) -> String`, `get(id)`, `list(date_from, date_to, offset, limit)` — identical pattern to `SessionsConfig`
+  - `cdrs_router(Arc<CdrsConfig>) -> Router`: `GET /cdrs` (paginated with X-Total-Count/X-Limit/Link), `GET /cdrs/{cdr_id}`, `POST /cdrs` (201 Created + Location header)
+  - `OcpiClient::get_cdrs` — appends query params manually (date_from, date_to, offset, limit) and extracts pagination headers
+  - `OcpiClient::get_cdr` — single fetch, maps HTTP 404 → `ClientError::NotFound`
+  - `OcpiClient::post_cdr` — POSTs CDR, extracts `Location` header from 201 response
+  - 6 new `CdrsConfig` unit tests (store/get roundtrip, missing-returns-none, filter by date_from, filter by date_to, pagination, trailing-slash normalisation)
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync note:** PR #24 and PR #31 still open (`needs-human`), both CI green. Issues #34 and #35 appear OPEN on GitHub despite being merged — likely auto-close didn't trigger since squash-merge commits target non-main SHAs; owner should close them manually.
+- **CDR key vs Session key:** CDRs use flat `id` key (not composite `{cc}/{party}/{id}`) — per spec, the CDR id is unique within the CPO's system and the POST assigns the URL. Sessions use a composite key because the receiver interface is keyed by `{country_code}/{party_id}/{session_id}`.
+- **`post_cdr` client returns Location string:** The `ClientError::EmptyData` is repurposed as "Location header absent" — acceptable because a 201 without a Location header is a server protocol error.
+- **Next:** #33 (M2: Credentials fetch-back, P1) — blocked on PR #24 (credentials router) merging. #29 (M3: Locations server handler, P1) — blocked on PR #31 (Locations types) merging. Once one unblocks, that's tomorrow's task. Alternatively groom M5 (Tariffs/Tokens) issues.
+
+---
+
 ## 2026-06-12 — M4: Sessions server handler + axum router + client methods (issue #36)
 
 - **Issue:** #36 — `SessionsHandler` trait, `SessionsConfig` (RwLock store, RFC 7396 merge-patch), `sessions_router()`, `ClientError::NotFound`, 5 client methods

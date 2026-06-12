@@ -14,8 +14,8 @@ mod error;
 pub use error::ClientError;
 
 use ocpi_types::{
-    transport::{CredentialToken, PaginationMeta},
-    v2_2_1::{ChargingPreferences, ChargingPreferencesResponse, Credentials, Session},
+    transport::{CredentialToken, PaginatedParams, PaginationMeta},
+    v2_2_1::{Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials, Session},
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
 };
@@ -464,6 +464,129 @@ impl OcpiClient {
             .error_for_status()?;
         let envelope: OcpiResponse<ChargingPreferencesResponse> = response.json().await?;
         envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    // ── CDRs ──────────────────────────────────────────────────────────────────
+
+    /// Fetch a paginated list of CDRs from a CPO (`GET {url}`).
+    ///
+    /// `url` is the absolute URL of the CPO's CDRs sender endpoint.
+    /// `params` carries `date_from`, `date_to`, `offset`, and `limit`.
+    ///
+    /// Returns the first page of CDRs plus pagination metadata. Use
+    /// `PaginationMeta.next_url` to retrieve subsequent pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn get_cdrs(
+        &self,
+        url: &str,
+        params: PaginatedParams,
+    ) -> Result<(Vec<Cdr>, PaginationMeta), ClientError> {
+        let mut parsed = url::Url::parse(url)?;
+        if let Some(date_from) = params.date_from {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_from", &date_from.to_rfc3339());
+        }
+        if let Some(date_to) = params.date_to {
+            parsed
+                .query_pairs_mut()
+                .append_pair("date_to", &date_to.to_rfc3339());
+        }
+        if let Some(offset) = params.offset {
+            parsed
+                .query_pairs_mut()
+                .append_pair("offset", &offset.to_string());
+        }
+        if let Some(limit) = params.limit {
+            parsed
+                .query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        let response = self
+            .http
+            .get(parsed)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?
+            .error_for_status()?;
+        let hdrs = response.headers();
+        let link = hdrs
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let total_count = hdrs
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let limit_hdr = hdrs
+            .get("x-limit")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let meta = PaginationMeta::from_headers(
+            link.as_deref(),
+            total_count.as_deref(),
+            limit_hdr.as_deref(),
+        )
+        .unwrap_or(PaginationMeta {
+            next_url: None,
+            total_count: 0,
+            limit: 50,
+        });
+        let envelope: OcpiResponse<Vec<Cdr>> = response.json().await?;
+        let cdrs = envelope.data.ok_or(ClientError::EmptyData)?;
+        Ok((cdrs, meta))
+    }
+
+    /// Fetch a single CDR by ID from a CPO (`GET {url}/{cdr_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::NotFound`] when the remote responds with OCPI
+    /// status code `2003`, or [`ClientError`] for other failures.
+    pub async fn get_cdr(&self, url: &str, cdr_id: &str) -> Result<Cdr, ClientError> {
+        let endpoint = format!("{}/{cdr_id}", url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url::Url::parse(&endpoint)?)
+            .header("Authorization", self.auth_header_value())
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        let response = response.error_for_status()?;
+        let envelope: OcpiResponse<Cdr> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Push a new CDR to an eMSP (`POST {url}`).
+    ///
+    /// On success the eMSP responds with `201 Created` and a `Location` header
+    /// pointing to the stored CDR. This method returns that URL string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails, the URL is invalid, or
+    /// the `Location` header is absent/unparseable.
+    pub async fn post_cdr(&self, url: &str, cdr: &Cdr) -> Result<String, ClientError> {
+        let response = self
+            .http
+            .post(url::Url::parse(url)?)
+            .header("Authorization", self.auth_header_value())
+            .json(cdr)
+            .send()
+            .await?
+            .error_for_status()?;
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned())
+            .ok_or(ClientError::EmptyData)?;
+        Ok(location)
     }
 }
 

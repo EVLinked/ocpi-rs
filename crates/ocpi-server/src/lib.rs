@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use ocpi_types::{
-    v2_2_1::{Credentials, Session},
+    v2_2_1::{Cdr, Credentials, Session},
     version::{Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
 };
@@ -436,6 +436,168 @@ impl SessionsHandler for SessionsConfig {
     }
 }
 
+// ── CdrsHandler ───────────────────────────────────────────────────────────────
+
+/// Handles the OCPI CDRs module endpoints.
+///
+/// Implements both the **sender** interface (CPO exposes `GET /cdrs`) and the
+/// **receiver** interface (eMSP exposes `POST /cdrs`).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_cdrs.asciidoc`
+#[allow(async_fn_in_trait)]
+pub trait CdrsHandler {
+    /// Paginated list of CDRs whose `last_updated` is in `[date_from, date_to)`
+    /// — sender interface (`GET /cdrs`).
+    ///
+    /// Returns `(page_items, total_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the query cannot be executed.
+    async fn get_cdrs(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Cdr>, u32), ServerError>;
+
+    /// Fetch a single CDR by its ID — sender interface (`GET /cdrs/{cdr_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the CDR does not exist.
+    async fn get_cdr(&self, cdr_id: &str) -> Result<Cdr, ServerError>;
+
+    /// Store a new CDR and return its URL — receiver interface (`POST /cdrs`).
+    ///
+    /// The returned `String` is the absolute URL at which the stored CDR can be
+    /// retrieved (used for the HTTP `Location` response header).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn post_cdr(&self, cdr: Cdr) -> Result<String, ServerError>;
+}
+
+// ── CdrsConfig ────────────────────────────────────────────────────────────────
+
+/// Thread-safe in-memory CDR store for use with [`http::cdrs_router`].
+///
+/// CDRs are keyed by their `id`. The `base_url` (e.g.
+/// `"https://example.com/ocpi/2.2.1"`) is prepended to construct the
+/// `Location` header returned by `POST /cdrs`.
+pub struct CdrsConfig {
+    base_url: String,
+    cdrs: std::sync::RwLock<std::collections::HashMap<String, Cdr>>,
+}
+
+impl std::fmt::Debug for CdrsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CdrsConfig")
+            .field("cdr_count", &self.cdrs.read().map(|m| m.len()).unwrap_or(0))
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl CdrsConfig {
+    /// Create an empty CDR store.
+    ///
+    /// `base_url` is used to build the `Location` header on `POST /cdrs`
+    /// (e.g. `"https://example.com/ocpi/2.2.1"`).
+    #[must_use]
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            cdrs: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Construct the URL for a CDR by its ID.
+    fn cdr_url(&self, cdr_id: &str) -> String {
+        format!("{}/cdrs/{cdr_id}", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Store a CDR and return its URL.
+    pub fn store(&self, cdr: Cdr) -> String {
+        let id = cdr.id.as_str().to_string();
+        let url = self.cdr_url(&id);
+        self.cdrs
+            .write()
+            .expect("lock not poisoned")
+            .insert(id, cdr);
+        url
+    }
+
+    /// Retrieve a CDR by its ID.
+    #[must_use]
+    pub fn get(&self, cdr_id: &str) -> Option<Cdr> {
+        self.cdrs
+            .read()
+            .expect("lock not poisoned")
+            .get(cdr_id)
+            .cloned()
+    }
+
+    /// Return a filtered and paginated slice of CDRs.
+    ///
+    /// Filters by `last_updated >= date_from` and (if provided)
+    /// `last_updated < date_to`. Results are sorted by `last_updated`.
+    ///
+    /// Returns `(page_items, total_matching_count)`.
+    #[must_use]
+    pub fn list(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<Cdr>, u32) {
+        let map = self.cdrs.read().expect("lock not poisoned");
+        let mut filtered: Vec<&Cdr> = map
+            .values()
+            .filter(|c| c.last_updated >= date_from && date_to.is_none_or(|dt| c.last_updated < dt))
+            .collect();
+        filtered.sort_by_key(|c| c.last_updated);
+        let total = filtered.len() as u32;
+        let page: Vec<Cdr> = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        (page, total)
+    }
+}
+
+impl Default for CdrsConfig {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl CdrsHandler for CdrsConfig {
+    async fn get_cdrs(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Cdr>, u32), ServerError> {
+        Ok(self.list(date_from, date_to, offset, limit))
+    }
+
+    async fn get_cdr(&self, cdr_id: &str) -> Result<Cdr, ServerError> {
+        self.get(cdr_id).ok_or(ServerError::NotFound)
+    }
+
+    async fn post_cdr(&self, cdr: Cdr) -> Result<String, ServerError> {
+        Ok(self.store(cdr))
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -477,12 +639,12 @@ pub mod http {
     use ocpi_types::{
         envelope::{OcpiPaged, OcpiResponse},
         transport::PaginatedParams,
-        v2_2_1::Session,
+        v2_2_1::{Cdr, Session},
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
-    use crate::{ServerError, SessionsConfig, VersionsConfig};
+    use crate::{CdrsConfig, ServerError, SessionsConfig, VersionsConfig};
 
     // ── Versions ──────────────────────────────────────────────────────────────
 
@@ -638,6 +800,89 @@ pub mod http {
                 .into_response(),
         }
     }
+
+    // ── CDRs ──────────────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI CDRs module.
+    ///
+    /// Exposes:
+    /// - `GET  /cdrs` — paginated list (sender interface, CPO)
+    /// - `GET  /cdrs/{cdr_id}` — single CDR (sender interface, CPO)
+    /// - `POST /cdrs` — store a new CDR (receiver interface, eMSP); responds
+    ///   `201 Created` with a `Location` header pointing to the stored CDR.
+    ///
+    /// OCPI routing headers (`OCPI-from/to-party-id/country-code`) are accepted
+    /// on all routes; they are not enforced at this layer.
+    pub fn cdrs_router(config: Arc<CdrsConfig>) -> Router {
+        Router::new()
+            .route("/cdrs", get(cdrs_list).post(cdrs_post))
+            .route("/cdrs/{cdr_id}", get(cdrs_get))
+            .with_state(config)
+    }
+
+    async fn cdrs_list(
+        State(cfg): State<Arc<CdrsConfig>>,
+        Query(params): Query<PaginatedParams>,
+    ) -> Response {
+        use ocpi_types::chrono::TimeZone as _;
+        let date_from = params.date_from.unwrap_or_else(|| {
+            ocpi_types::Utc
+                .with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
+                .single()
+                .expect("epoch is valid")
+        });
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        let (items, total) = cfg.list(date_from, params.date_to, offset, limit);
+        let page = OcpiPaged::new(items, offset, limit, total);
+        let next_offset = page.next_offset();
+        let body = page.into_response();
+
+        let mut response = Json(body).into_response();
+        let hdrs = response.headers_mut();
+        if let Ok(v) = total.to_string().parse() {
+            hdrs.insert("x-total-count", v);
+        }
+        if let Ok(v) = limit.to_string().parse() {
+            hdrs.insert("x-limit", v);
+        }
+        if let Some(next_off) = next_offset {
+            let link = format!("</cdrs?offset={next_off}&limit={limit}>; rel=\"next\"");
+            if let Ok(v) = link.parse() {
+                hdrs.insert("link", v);
+            }
+        }
+
+        response
+    }
+
+    async fn cdrs_get(State(cfg): State<Arc<CdrsConfig>>, Path(cdr_id): Path<String>) -> Response {
+        match cfg.get(&cdr_id) {
+            Some(cdr) => Json(OcpiResponse::success(cdr)).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<Cdr>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!("CDR {cdr_id} not found"),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cdrs_post(State(cfg): State<Arc<CdrsConfig>>, Json(cdr): Json<Cdr>) -> Response {
+        let location_url = cfg.store(cdr);
+        let mut response = (
+            StatusCode::CREATED,
+            Json(OcpiResponse::<Cdr>::success_empty()),
+        )
+            .into_response();
+        if let Ok(v) = location_url.parse() {
+            response.headers_mut().insert("location", v);
+        }
+        response
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -647,7 +892,10 @@ mod tests {
     use super::*;
     use ocpi_types::chrono::TimeZone as _;
     use ocpi_types::{
-        v2_2_1::{AuthMethod, CdrToken, Session, SessionStatus, TokenType},
+        v2_2_1::{
+            AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
+            ConnectorFormat, ConnectorType, PowerType, Session, SessionStatus, TokenType,
+        },
         OcpiStatusCode,
     };
 
@@ -854,5 +1102,147 @@ mod tests {
             OcpiStatusCode::UnsupportedVersion,
         ));
         assert_eq!(err.status_code(), OcpiStatusCode::UnsupportedVersion);
+    }
+
+    // ── CdrsConfig tests ──────────────────────────────────────────────────────
+
+    fn make_cdr(id: &str, ts: DateTime<Utc>) -> Cdr {
+        use ocpi_types::common::{CiString2, CiString3, CiString36, CiString39, CiString48};
+        Cdr {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("CPO").unwrap(),
+            id: CiString39::try_from(id).unwrap(),
+            start_date_time: ts,
+            end_date_time: ts,
+            session_id: None,
+            cdr_token: CdrToken {
+                country_code: CiString2::try_from("NL").unwrap(),
+                party_id: CiString3::try_from("MSP").unwrap(),
+                uid: CiString36::try_from("RFID001").unwrap(),
+                token_type: TokenType::Rfid,
+                contract_id: CiString36::try_from("NL-MSP-0001").unwrap(),
+            },
+            auth_method: AuthMethod::Whitelist,
+            authorization_reference: None,
+            cdr_location: CdrLocation {
+                id: CiString36::try_from("LOC1").unwrap(),
+                name: None,
+                address: "Test St 1".into(),
+                city: "Amsterdam".into(),
+                postal_code: None,
+                state: None,
+                country: "NLD".into(),
+                coordinates: ocpi_types::common::GeoLocation {
+                    latitude: "52.370216".into(),
+                    longitude: "4.895168".into(),
+                },
+                evse_uid: CiString36::try_from("EVSE1").unwrap(),
+                evse_id: CiString48::try_from("NL*CPO*E001").unwrap(),
+                connector_id: CiString36::try_from("1").unwrap(),
+                connector_standard: ConnectorType::Iec62196T2,
+                connector_format: ConnectorFormat::Socket,
+                connector_power_type: PowerType::Ac3Phase,
+            },
+            meter_id: None,
+            currency: "EUR".into(),
+            tariffs: vec![],
+            charging_periods: vec![ChargingPeriod {
+                start_date_time: ts,
+                dimensions: vec![CdrDimension {
+                    dimension_type: CdrDimensionType::Energy,
+                    volume: 10.0,
+                }],
+                tariff_id: None,
+            }],
+            signed_data: None,
+            total_cost: ocpi_types::common::Price {
+                excl_vat: 2.50,
+                incl_vat: None,
+            },
+            total_fixed_cost: None,
+            total_energy: 10.0,
+            total_energy_cost: None,
+            total_time: 0.5,
+            total_time_cost: None,
+            total_parking_time: None,
+            total_parking_cost: None,
+            total_reservation_cost: None,
+            remark: None,
+            invoice_reference_id: None,
+            credit: None,
+            credit_reference_id: None,
+            home_charging_compensation: None,
+            last_updated: ts,
+        }
+    }
+
+    #[test]
+    fn cdrs_config_store_and_get_roundtrip() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1");
+        let ts = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let cdr = make_cdr("CDR001", ts);
+        let url = cfg.store(cdr.clone());
+        assert_eq!(url, "https://example.com/ocpi/2.2.1/cdrs/CDR001");
+        let got = cfg.get("CDR001").unwrap();
+        assert_eq!(got.id.as_str(), "CDR001");
+    }
+
+    #[test]
+    fn cdrs_config_get_missing_returns_none() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1");
+        assert!(cfg.get("MISSING").is_none());
+    }
+
+    #[test]
+    fn cdrs_config_list_filters_by_date_from() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1");
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.store(make_cdr("CDR001", t1));
+        cfg.store(make_cdr("CDR002", t2));
+
+        let cutoff = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(cutoff, None, 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id.as_str(), "CDR002");
+    }
+
+    #[test]
+    fn cdrs_config_list_filters_by_date_to() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1");
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.store(make_cdr("CDR001", t1));
+        cfg.store(make_cdr("CDR002", t2));
+
+        let from = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(from, Some(to), 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id.as_str(), "CDR001");
+    }
+
+    #[test]
+    fn cdrs_config_list_pagination() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1");
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        for i in 0u32..5 {
+            let ts = epoch + ocpi_types::chrono::Duration::seconds(i64::from(i));
+            cfg.store(make_cdr(&format!("CDR{i:03}"), ts));
+        }
+
+        let (page, total) = cfg.list(epoch, None, 2, 2);
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id.as_str(), "CDR002");
+        assert_eq!(page[1].id.as_str(), "CDR003");
+    }
+
+    #[test]
+    fn cdrs_config_url_trailing_slash_normalised() {
+        let cfg = CdrsConfig::new("https://example.com/ocpi/2.2.1/");
+        let ts = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let url = cfg.store(make_cdr("CDR001", ts));
+        assert_eq!(url, "https://example.com/ocpi/2.2.1/cdrs/CDR001");
     }
 }
