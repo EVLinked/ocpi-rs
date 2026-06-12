@@ -8,7 +8,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::common::{BusinessDetails, CiString2, CiString3, CiString36, Price, Role, Url};
+use crate::common::{
+    BusinessDetails, CiString, CiString2, CiString3, CiString36, CiString39, CiString48,
+    GeoLocation, Price, Role, Url,
+};
 use crate::OcpiError;
 
 // ── CredentialsRole ───────────────────────────────────────────────────────────
@@ -354,6 +357,352 @@ pub struct Session {
     /// Current status of the session.
     pub status: SessionStatus,
     /// Timestamp of the last update (or creation) of this session object.
+    pub last_updated: DateTime<Utc>,
+}
+
+// ── ConnectorType ─────────────────────────────────────────────────────────────
+
+/// Standard of an EVSE connector socket or plug.
+///
+/// Forward reference: mirrors the Locations module's `ConnectorType`. Defined
+/// here so that `CdrLocation` compiles while PR #31 (Locations types) is still
+/// pending human review.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — ConnectorType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConnectorType {
+    /// CHAdeMO, DC.
+    Chademo,
+    /// ChaoJi — next-gen connector harmonized between CHAdeMO and GB/T. DC.
+    Chaoji,
+    /// Domestic household type A — NEMA 1-15, 2 pins.
+    DomesticA,
+    /// Domestic household type B — NEMA 5-15, 3 pins.
+    DomesticB,
+    /// Domestic household type C — CEE 7/17, 2 pins.
+    DomesticC,
+    /// Domestic household type D — 3 pin.
+    DomesticD,
+    /// Domestic household type E — CEE 7/5, 3 pins.
+    DomesticE,
+    /// Domestic household type F — CEE 7/4 Schuko, 3 pins.
+    DomesticF,
+    /// Domestic household type G — BS 1363, Commonwealth, 3 pins.
+    DomesticG,
+    /// Domestic household type H — SI-32, 3 pins.
+    DomesticH,
+    /// Domestic household type I — AS 3112, 3 pins.
+    DomesticI,
+    /// Domestic household type J — SEV 1011, 3 pins.
+    DomesticJ,
+    /// Domestic household type K — DS 60884-2-D1, 3 pins.
+    DomesticK,
+    /// Domestic household type L — CEI 23-16-VII, 3 pins.
+    DomesticL,
+    /// Domestic household type M — BS 546, 3 pins.
+    DomesticM,
+    /// Domestic household type N — NBR 14136, 3 pins.
+    DomesticN,
+    /// Domestic household type O — TIS 166-2549, 3 pins.
+    DomesticO,
+    /// Guobiao GB/T 20234.2 AC socket/connector.
+    GbtAc,
+    /// Guobiao GB/T 20234.3 DC connector.
+    GbtDc,
+    /// IEC 60309-2 Industrial single phase 16 A (typically blue).
+    #[serde(rename = "IEC_60309_2_single_16")]
+    Iec6030921Single16,
+    /// IEC 60309-2 Industrial three phase 16 A (typically red).
+    #[serde(rename = "IEC_60309_2_three_16")]
+    Iec6030922Three16,
+    /// IEC 60309-2 Industrial three phase 32 A (typically red).
+    #[serde(rename = "IEC_60309_2_three_32")]
+    Iec6030922Three32,
+    /// IEC 60309-2 Industrial three phase 64 A (typically red).
+    #[serde(rename = "IEC_60309_2_three_64")]
+    Iec6030922Three64,
+    /// IEC 62196 Type 1 "SAE J1772".
+    #[serde(rename = "IEC_62196_T1")]
+    Iec62196T1,
+    /// Combo Type 1 based, DC.
+    #[serde(rename = "IEC_62196_T1_COMBO")]
+    Iec62196T1Combo,
+    /// IEC 62196 Type 2 "Mennekes".
+    #[serde(rename = "IEC_62196_T2")]
+    Iec62196T2,
+    /// Combo Type 2 based, DC.
+    #[serde(rename = "IEC_62196_T2_COMBO")]
+    Iec62196T2Combo,
+    /// IEC 62196 Type 3A.
+    #[serde(rename = "IEC_62196_T3A")]
+    Iec62196T3a,
+    /// IEC 62196 Type 3C "Scame".
+    #[serde(rename = "IEC_62196_T3C")]
+    Iec62196T3c,
+    /// NEMA 5-20, 3 pins.
+    #[serde(rename = "NEMA_5_20")]
+    Nema520,
+    /// NEMA 6-30, 3 pins.
+    #[serde(rename = "NEMA_6_30")]
+    Nema630,
+    /// NEMA 6-50, 3 pins.
+    #[serde(rename = "NEMA_6_50")]
+    Nema650,
+    /// NEMA 10-30, 3 pins.
+    #[serde(rename = "NEMA_10_30")]
+    Nema1030,
+    /// NEMA 10-50, 3 pins.
+    #[serde(rename = "NEMA_10_50")]
+    Nema1050,
+    /// NEMA 14-30, 3 pins, 30 A.
+    #[serde(rename = "NEMA_14_30")]
+    Nema1430,
+    /// NEMA 14-50, 3 pins, 50 A.
+    #[serde(rename = "NEMA_14_50")]
+    Nema1450,
+    /// On-board bottom-up pantograph (typically for bus charging).
+    PantographBottomUp,
+    /// Off-board top-down pantograph (typically for bus charging).
+    PantographTopDown,
+    /// Tesla Connector "Roadster"-type (round, 4 pin).
+    TeslaR,
+    /// Tesla Connector "Model S"-type (oval, 5 pin).
+    TeslaS,
+}
+
+// ── ConnectorFormat ───────────────────────────────────────────────────────────
+
+/// Whether the connector is a socket (user brings cable) or an attached cable.
+///
+/// Forward reference: mirrors the Locations module's `ConnectorFormat`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — ConnectorFormat enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConnectorFormat {
+    /// The connector is a socket; the EV user needs to bring a fitting plug.
+    Socket,
+    /// The connector is an attached cable; the EV needs a fitting inlet.
+    Cable,
+}
+
+// ── PowerType ─────────────────────────────────────────────────────────────────
+
+/// Electrical power type at an EVSE.
+///
+/// Forward reference: mirrors the Locations module's `PowerType`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — PowerType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PowerType {
+    /// AC single phase.
+    #[serde(rename = "AC_1_PHASE")]
+    Ac1Phase,
+    /// AC two phases (two of three available phases connected).
+    #[serde(rename = "AC_2_PHASE")]
+    Ac2Phase,
+    /// AC two phases using a split-phase system.
+    #[serde(rename = "AC_2_PHASE_SPLIT")]
+    Ac2PhaseSplit,
+    /// AC three phases.
+    #[serde(rename = "AC_3_PHASE")]
+    Ac3Phase,
+    /// Direct current.
+    #[serde(rename = "DC")]
+    Dc,
+}
+
+// ── CdrLocation ───────────────────────────────────────────────────────────────
+
+/// Compact location snapshot embedded in a CDR.
+///
+/// Contains only the fields from the full `Location` object that are relevant
+/// to a concluded charging session: the specific EVSE and connector used.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_cdrs.asciidoc` — CdrLocation class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CdrLocation {
+    /// Unique location ID within the CPO's platform.
+    pub id: CiString36,
+    /// Human-readable display name of the location.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    /// Street/block name and house number.
+    pub address: String,
+    /// City or town.
+    pub city: String,
+    /// Postal code (may be absent at highway locations in some countries).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub postal_code: Option<String>,
+    /// State or province (only when relevant).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub state: Option<String>,
+    /// ISO 3166-1 alpha-3 country code.
+    pub country: String,
+    /// GPS coordinates of the location.
+    pub coordinates: GeoLocation,
+    /// Technical EVSE identifier within the CPO's platform.
+    pub evse_uid: CiString36,
+    /// eMI3-compliant human-readable EVSE ID (up to 48 chars).
+    pub evse_id: CiString48,
+    /// Connector identifier within the EVSE.
+    pub connector_id: CiString36,
+    /// Physical connector standard.
+    pub connector_standard: ConnectorType,
+    /// Connector format (socket or attached cable).
+    pub connector_format: ConnectorFormat,
+    /// Electrical power type.
+    pub connector_power_type: PowerType,
+}
+
+// ── SignedValue ───────────────────────────────────────────────────────────────
+
+/// One signed meter value within a `SignedData` block.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_cdrs.asciidoc` — SignedValue class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedValue {
+    /// Nature of the value (e.g. `"Start"`, `"End"`, `"Intermediate"`).
+    pub nature: CiString<32>,
+    /// Plain (un-encoded) meter data string.
+    pub plain_data: String,
+    /// Base64-encoded signed meter data blob.
+    pub signed_data: String,
+}
+
+// ── SignedData ────────────────────────────────────────────────────────────────
+
+/// Signed metering data attached to a CDR (e.g. for German Eichrecht).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_cdrs.asciidoc` — SignedData class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedData {
+    /// Name of the encoding method (assigned by a standards body or vendor).
+    pub encoding_method: CiString36,
+    /// Version of the encoding method, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub encoding_method_version: Option<i32>,
+    /// Base64-encoded public key used to sign the data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub public_key: Option<String>,
+    /// One or more signed meter values.
+    pub signed_values: Vec<SignedValue>,
+    /// URL where the EV driver can verify the signed data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub url: Option<String>,
+}
+
+// ── Tariff (forward declaration) ──────────────────────────────────────────────
+
+/// Tariff object — forward declaration pending M5-Tariffs.
+///
+/// Contains only the always-required scalar fields. Optional fields and the
+/// `elements` array will be modeled when the Tariffs module is implemented.
+/// Unknown fields are silently ignored during deserialization.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tariffs.asciidoc` — Tariff object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tariff {
+    /// ISO 3166-1 alpha-2 country code of the CPO that owns this tariff.
+    pub country_code: CiString2,
+    /// Party ID of the CPO that owns this tariff.
+    pub party_id: CiString3,
+    /// Unique tariff ID within the CPO's platform.
+    pub id: CiString36,
+    /// ISO 4217 currency code.
+    pub currency: String,
+    /// Timestamp of the last update (or creation) of this tariff.
+    pub last_updated: DateTime<Utc>,
+}
+
+// ── Cdr ───────────────────────────────────────────────────────────────────────
+
+/// A Charge Detail Record — the billing artifact for a completed charging session.
+///
+/// CDRs are immutable after creation. Corrections are issued via a Credit CDR
+/// (set `credit = true` and point `credit_reference_id` at the original CDR).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_cdrs.asciidoc` — CDR object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cdr {
+    /// ISO 3166-1 alpha-2 country code of the CPO that owns this CDR.
+    pub country_code: CiString2,
+    /// Party ID of the CPO that owns this CDR.
+    pub party_id: CiString3,
+    /// Unique CDR ID. Credit CDRs may append a suffix (e.g. `-C`), raising
+    /// the limit to 39 chars; normal CDRs must stay within 36.
+    pub id: CiString39,
+    /// Timestamp when charging started (or reservation started).
+    pub start_date_time: DateTime<Utc>,
+    /// Timestamp when the session ended (charging + any post-charge parking).
+    pub end_date_time: DateTime<Utc>,
+    /// ID of the corresponding `Session`, if the Sessions module is in use.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_id: Option<CiString36>,
+    /// Token used to start the session.
+    pub cdr_token: CdrToken,
+    /// Authentication method used (the last method if multiple were used).
+    pub auth_method: AuthMethod,
+    /// Authorization reference provided by the eMSP, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub authorization_reference: Option<CiString36>,
+    /// Compact location snapshot for the EVSE and connector used.
+    pub cdr_location: CdrLocation,
+    /// Meter identifier inside the charge point, if known.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub meter_id: Option<String>,
+    /// ISO 4217 currency code for all cost fields.
+    pub currency: String,
+    /// Tariffs applicable to this session (may be empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tariffs: Vec<Tariff>,
+    /// Charging periods that make up this session (one or more required).
+    pub charging_periods: Vec<ChargingPeriod>,
+    /// Signed metering data (e.g. Eichrecht), when present.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signed_data: Option<SignedData>,
+    /// Total cost of the transaction in `currency`.
+    pub total_cost: Price,
+    /// Fixed cost component (start fee, etc.), excluding parking/reservation fixed fees.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_fixed_cost: Option<Price>,
+    /// Total energy charged, in kWh.
+    pub total_energy: f64,
+    /// Cost of all energy consumed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_energy_cost: Option<Price>,
+    /// Total session duration (charging + non-charging), in hours.
+    pub total_time: f64,
+    /// Cost of charging-time duration.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_time_cost: Option<Price>,
+    /// Time the EV was connected but not charging, in hours.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_parking_time: Option<f64>,
+    /// Cost of post-charge parking.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_parking_cost: Option<Price>,
+    /// Cost of the reservation, if any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_reservation_cost: Option<Price>,
+    /// Human-readable remark (e.g. reason for early stop).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub remark: Option<String>,
+    /// Invoice reference — links this CDR to a future invoice.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub invoice_reference_id: Option<CiString39>,
+    /// `true` if this CDR is a Credit CDR that negates a previous session.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub credit: Option<bool>,
+    /// ID of the original CDR being credited (required when `credit` is `true`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub credit_reference_id: Option<CiString39>,
+    /// `true` if this session used the driver's home charger and energy cost
+    /// compensation applies.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub home_charging_compensation: Option<bool>,
+    /// Timestamp of the last update (or creation) of this CDR object.
     pub last_updated: DateTime<Utc>,
 }
 
@@ -859,5 +1208,375 @@ mod tests {
         assert!(s.total_cost.is_some());
         assert!((s.kwh - 41.12).abs() < f64::EPSILON);
         assert!(s.end_date_time.is_some());
+    }
+
+    // ── ConnectorType / ConnectorFormat / PowerType ───────────────────────────
+
+    #[test]
+    fn connector_type_screaming_snake_standard_variants() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Chademo).unwrap(),
+            "\"CHADEMO\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::DomesticA).unwrap(),
+            "\"DOMESTIC_A\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::GbtAc).unwrap(),
+            "\"GBT_AC\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::TeslaS).unwrap(),
+            "\"TESLA_S\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::PantographBottomUp).unwrap(),
+            "\"PANTOGRAPH_BOTTOM_UP\""
+        );
+    }
+
+    #[test]
+    fn connector_type_explicit_renames() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Iec6030921Single16).unwrap(),
+            "\"IEC_60309_2_single_16\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Iec6030922Three32).unwrap(),
+            "\"IEC_60309_2_three_32\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Iec62196T1).unwrap(),
+            "\"IEC_62196_T1\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Iec62196T2Combo).unwrap(),
+            "\"IEC_62196_T2_COMBO\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Iec62196T3a).unwrap(),
+            "\"IEC_62196_T3A\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Nema520).unwrap(),
+            "\"NEMA_5_20\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorType::Nema1450).unwrap(),
+            "\"NEMA_14_50\""
+        );
+    }
+
+    #[test]
+    fn connector_type_roundtrip() {
+        for ct in [
+            ConnectorType::Chademo,
+            ConnectorType::Iec62196T2,
+            ConnectorType::Iec6030921Single16,
+            ConnectorType::Nema1030,
+            ConnectorType::PantographTopDown,
+        ] {
+            let json = serde_json::to_string(&ct).unwrap();
+            let back: ConnectorType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, ct);
+        }
+    }
+
+    #[test]
+    fn connector_format_serde() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorFormat::Socket).unwrap(),
+            "\"SOCKET\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorFormat::Cable).unwrap(),
+            "\"CABLE\""
+        );
+        let back: ConnectorFormat = serde_json::from_str("\"SOCKET\"").unwrap();
+        assert_eq!(back, ConnectorFormat::Socket);
+    }
+
+    #[test]
+    fn power_type_serde() {
+        assert_eq!(
+            serde_json::to_string(&PowerType::Ac1Phase).unwrap(),
+            "\"AC_1_PHASE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PowerType::Ac2PhaseSplit).unwrap(),
+            "\"AC_2_PHASE_SPLIT\""
+        );
+        assert_eq!(serde_json::to_string(&PowerType::Dc).unwrap(), "\"DC\"");
+        for pt in [
+            PowerType::Ac1Phase,
+            PowerType::Ac2Phase,
+            PowerType::Ac2PhaseSplit,
+            PowerType::Ac3Phase,
+            PowerType::Dc,
+        ] {
+            let json = serde_json::to_string(&pt).unwrap();
+            let back: PowerType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, pt);
+        }
+    }
+
+    // ── CdrLocation ───────────────────────────────────────────────────────────
+
+    fn make_cdr_location() -> CdrLocation {
+        CdrLocation {
+            id: CiString36::try_from("LOC1").unwrap(),
+            name: Some("Gent Zuid".into()),
+            address: "F.Rooseveltlaan 3A".into(),
+            city: "Gent".into(),
+            postal_code: Some("9000".into()),
+            state: None,
+            country: "BEL".into(),
+            coordinates: crate::common::GeoLocation {
+                latitude: "51.047599".into(),
+                longitude: "3.729944".into(),
+            },
+            evse_uid: CiString36::try_from("3256").unwrap(),
+            evse_id: CiString48::try_from("BE*BEC*E041503001").unwrap(),
+            connector_id: CiString36::try_from("1").unwrap(),
+            connector_standard: ConnectorType::Iec62196T2,
+            connector_format: ConnectorFormat::Socket,
+            connector_power_type: PowerType::Ac3Phase,
+        }
+    }
+
+    #[test]
+    fn cdr_location_serde_roundtrip() {
+        let loc = make_cdr_location();
+        let json = serde_json::to_string(&loc).unwrap();
+        assert!(json.contains("\"IEC_62196_T2\""));
+        assert!(json.contains("\"SOCKET\""));
+        assert!(json.contains("\"AC_3_PHASE\""));
+        let back: CdrLocation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, loc);
+    }
+
+    #[test]
+    fn cdr_location_optional_fields_absent_when_none() {
+        let mut loc = make_cdr_location();
+        loc.name = None;
+        loc.postal_code = None;
+        let json = serde_json::to_string(&loc).unwrap();
+        assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"postal_code\""));
+        assert!(!json.contains("\"state\""));
+    }
+
+    // ── SignedValue / SignedData ───────────────────────────────────────────────
+
+    #[test]
+    fn signed_value_serde_roundtrip() {
+        let sv = SignedValue {
+            nature: CiString::<32>::try_from("Start").unwrap(),
+            plain_data: "1234567890".into(),
+            signed_data: "SGVsbG8gV29ybGQ=".into(),
+        };
+        let json = serde_json::to_string(&sv).unwrap();
+        assert!(json.contains("\"Start\""));
+        let back: SignedValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sv);
+    }
+
+    #[test]
+    fn signed_data_serde_roundtrip() {
+        let sd = SignedData {
+            encoding_method: CiString36::try_from("OCMF").unwrap(),
+            encoding_method_version: Some(1),
+            public_key: Some("base64key==".into()),
+            signed_values: vec![SignedValue {
+                nature: CiString::<32>::try_from("End").unwrap(),
+                plain_data: "data".into(),
+                signed_data: "c2lnbg==".into(),
+            }],
+            url: Some("https://example.com/verify".into()),
+        };
+        let json = serde_json::to_string(&sd).unwrap();
+        let back: SignedData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sd);
+    }
+
+    #[test]
+    fn signed_data_optional_fields_absent_when_none() {
+        let sd = SignedData {
+            encoding_method: CiString36::try_from("OCMF").unwrap(),
+            encoding_method_version: None,
+            public_key: None,
+            signed_values: vec![SignedValue {
+                nature: CiString::<32>::try_from("Start").unwrap(),
+                plain_data: "p".into(),
+                signed_data: "s".into(),
+            }],
+            url: None,
+        };
+        let json = serde_json::to_string(&sd).unwrap();
+        assert!(!json.contains("encoding_method_version"));
+        assert!(!json.contains("public_key"));
+        assert!(!json.contains("\"url\""));
+    }
+
+    // ── Cdr ───────────────────────────────────────────────────────────────────
+
+    fn make_cdr() -> Cdr {
+        Cdr {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("TNM").unwrap(),
+            id: CiString39::try_from("12345").unwrap(),
+            start_date_time: chrono::DateTime::parse_from_rfc3339("2015-06-29T21:39:09Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            end_date_time: chrono::DateTime::parse_from_rfc3339("2015-06-29T23:37:32Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            session_id: None,
+            cdr_token: make_cdr_token(),
+            auth_method: AuthMethod::Whitelist,
+            authorization_reference: None,
+            cdr_location: make_cdr_location(),
+            meter_id: None,
+            currency: "EUR".into(),
+            tariffs: vec![],
+            charging_periods: vec![ChargingPeriod {
+                start_date_time: chrono::DateTime::parse_from_rfc3339("2015-06-29T21:39:09Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                dimensions: vec![CdrDimension {
+                    dimension_type: CdrDimensionType::Energy,
+                    volume: 120.0,
+                }],
+                tariff_id: None,
+            }],
+            signed_data: None,
+            total_cost: crate::common::Price {
+                excl_vat: 4.00,
+                incl_vat: None,
+            },
+            total_fixed_cost: None,
+            total_energy: 120.0,
+            total_energy_cost: None,
+            total_time: 1.973,
+            total_time_cost: None,
+            total_parking_time: None,
+            total_parking_cost: None,
+            total_reservation_cost: None,
+            remark: None,
+            invoice_reference_id: None,
+            credit: None,
+            credit_reference_id: None,
+            home_charging_compensation: None,
+            last_updated: chrono::DateTime::parse_from_rfc3339("2015-06-29T23:37:32Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn cdr_serde_roundtrip() {
+        let cdr = make_cdr();
+        let json = serde_json::to_string(&cdr).unwrap();
+        let back: Cdr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cdr);
+    }
+
+    #[test]
+    fn cdr_optional_fields_absent_when_none() {
+        let cdr = make_cdr();
+        let json = serde_json::to_string(&cdr).unwrap();
+        assert!(!json.contains("session_id"));
+        assert!(!json.contains("authorization_reference"));
+        assert!(!json.contains("meter_id"));
+        assert!(!json.contains("tariffs"));
+        assert!(!json.contains("signed_data"));
+        assert!(!json.contains("total_fixed_cost"));
+        assert!(!json.contains("total_energy_cost"));
+        assert!(!json.contains("total_time_cost"));
+        assert!(!json.contains("total_parking_time"));
+        assert!(!json.contains("total_parking_cost"));
+        assert!(!json.contains("total_reservation_cost"));
+        assert!(!json.contains("remark"));
+        assert!(!json.contains("invoice_reference_id"));
+        assert!(!json.contains("credit"));
+        assert!(!json.contains("home_charging_compensation"));
+    }
+
+    #[test]
+    fn cdr_credit_fields_present_when_set() {
+        let mut cdr = make_cdr();
+        cdr.credit = Some(true);
+        cdr.credit_reference_id = Some(CiString39::try_from("12345").unwrap());
+        let json = serde_json::to_string(&cdr).unwrap();
+        assert!(json.contains("\"credit\":true"));
+        assert!(json.contains("credit_reference_id"));
+        let back: Cdr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.credit, Some(true));
+        assert_eq!(
+            back.credit_reference_id.as_ref().map(|s| s.as_str()),
+            Some("12345")
+        );
+    }
+
+    #[test]
+    fn cdr_spec_example_deserialization() {
+        // Mirrors the structure from mod_cdrs.asciidoc §Example of a CDR.
+        let json = r#"{
+            "country_code": "NL",
+            "party_id": "TNM",
+            "id": "12345",
+            "start_date_time": "2015-06-29T21:39:09Z",
+            "end_date_time": "2015-06-29T23:37:32Z",
+            "cdr_token": {
+                "country_code": "NL",
+                "party_id": "TNM",
+                "uid": "012345678",
+                "type": "RFID",
+                "contract_id": "NL8ACC12E46L89"
+            },
+            "auth_method": "WHITELIST",
+            "cdr_location": {
+                "id": "LOC1",
+                "address": "F.Rooseveltlaan 3A",
+                "city": "Gent",
+                "country": "BEL",
+                "coordinates": {"latitude": "51.047599", "longitude": "3.729944"},
+                "evse_uid": "3256",
+                "evse_id": "BE*BEC*E041503001",
+                "connector_id": "1",
+                "connector_standard": "IEC_62196_T2",
+                "connector_format": "SOCKET",
+                "connector_power_type": "AC_3_PHASE"
+            },
+            "currency": "EUR",
+            "charging_periods": [
+                {
+                    "start_date_time": "2015-06-29T21:39:09Z",
+                    "dimensions": [{"type": "ENERGY", "volume": 120.0}]
+                }
+            ],
+            "total_cost": {"excl_vat": 4.00},
+            "total_energy": 120.0,
+            "total_time": 1.973,
+            "last_updated": "2015-06-29T23:37:32Z"
+        }"#;
+        let cdr: Cdr = serde_json::from_str(json).unwrap();
+        assert_eq!(cdr.id.as_str(), "12345");
+        assert_eq!(cdr.auth_method, AuthMethod::Whitelist);
+        assert_eq!(
+            cdr.cdr_location.connector_standard,
+            ConnectorType::Iec62196T2
+        );
+        assert_eq!(cdr.cdr_location.connector_format, ConnectorFormat::Socket);
+        assert_eq!(cdr.cdr_location.connector_power_type, PowerType::Ac3Phase);
+        assert_eq!(cdr.charging_periods.len(), 1);
+        assert_eq!(
+            cdr.charging_periods[0].dimensions[0].dimension_type,
+            CdrDimensionType::Energy
+        );
+        assert!((cdr.total_energy - 120.0).abs() < f64::EPSILON);
+        assert!(cdr.credit.is_none());
+        assert!(cdr.tariffs.is_empty());
     }
 }

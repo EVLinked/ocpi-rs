@@ -134,6 +134,10 @@ pub type CiString2 = CiString<2>;
 pub type CiString3 = CiString<3>;
 /// `CiString(36)` — UUIDs and similar medium-length identifiers.
 pub type CiString36 = CiString<36>;
+/// `CiString(39)` — CDR IDs (allows a credit-CDR suffix beyond the usual 36).
+pub type CiString39 = CiString<39>;
+/// `CiString(48)` — EVSE IDs (eMI3 EVSE ID standard, up to 48 chars).
+pub type CiString48 = CiString<48>;
 /// `CiString(255)` — general-purpose, matches the URL field limit.
 pub type CiString255 = CiString<255>;
 
