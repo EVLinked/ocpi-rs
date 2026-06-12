@@ -886,6 +886,132 @@ pub struct Cdr {
     pub last_updated: DateTime<Utc>,
 }
 
+// ── Tokens module ─────────────────────────────────────────────────────────────
+
+/// Indicates when a CPO is allowed to whitelist a Token without real-time eMSP auth.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — WhitelistType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WhitelistType {
+    /// CPO shall always allow use of this Token without real-time authorization.
+    Always,
+    /// Whitelisting is allowed; real-time authorization is also allowed (CPO's choice).
+    Allowed,
+    /// Real-time authorization is preferred, but whitelist is used when eMSP is unreachable.
+    AllowedOffline,
+    /// Only real-time authorization; whitelisting is forbidden.
+    Never,
+}
+
+/// Result of a real-time authorization request.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — AllowedType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AllowedType {
+    /// Token is allowed to charge (at this location).
+    Allowed,
+    /// Token is blocked.
+    Blocked,
+    /// Token has expired.
+    Expired,
+    /// Account has insufficient credit.
+    NoCredit,
+    /// Token is valid but not allowed at the given location.
+    NotAllowed,
+}
+
+/// Driver's energy supplier contract, embedded in a [`Token`].
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — EnergyContract class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnergyContract {
+    /// Name of the energy supplier (max 64 chars).
+    pub supplier_name: String,
+    /// Contract ID at the energy supplier (max 64 chars).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub contract_id: Option<String>,
+}
+
+/// Reference to a location and optionally specific EVSEs within it.
+///
+/// Used in real-time authorization requests and responses.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — LocationReferences class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationReferences {
+    /// Unique identifier for the location.
+    pub location_id: CiString36,
+    /// Unique identifiers for EVSEs within the location.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evse_uids: Vec<CiString36>,
+}
+
+/// A Token object owned by the eMSP.
+///
+/// Pushed by the eMSP to CPOs; CPOs cache tokens and use them for local
+/// authorization. The `uid` + `type` combination is unique per eMSP.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — Token object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Token {
+    /// ISO 3166-1 alpha-2 country code of the eMSP that owns this token.
+    pub country_code: CiString2,
+    /// Party ID of the eMSP that owns this token.
+    pub party_id: CiString3,
+    /// Unique ID by which this token (combined with `type`) can be identified.
+    pub uid: CiString36,
+    /// Type of the token. Wire name is `type` (Rust keyword conflict).
+    #[serde(rename = "type")]
+    pub token_type: TokenType,
+    /// Contract ID (eMA ID) within the eMSP's platform.
+    pub contract_id: CiString36,
+    /// Visual number printed on the token (e.g. RFID card), max 64 chars.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub visual_number: Option<String>,
+    /// Issuing company name (max 64 chars).
+    pub issuer: String,
+    /// Group ID that links multiple tokens belonging to the same EV driver.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_id: Option<CiString36>,
+    /// Whether this token is currently valid.
+    pub valid: bool,
+    /// Whitelist policy — when the CPO may authorize without contacting the eMSP.
+    pub whitelist: WhitelistType,
+    /// ISO 639-1 preferred language of the token owner (max 2 chars).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub language: Option<String>,
+    /// Default smart-charging profile preference for sessions started with this token.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default_profile_type: Option<ProfileType>,
+    /// Energy supplier contract to use at the Charge Point, when supported.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub energy_contract: Option<EnergyContract>,
+    /// Timestamp when this token was last updated or created.
+    pub last_updated: DateTime<Utc>,
+}
+
+/// Response to a real-time authorization request (`POST /tokens/{uid}/authorize`).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_tokens.asciidoc` — AuthorizationInfo object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationInfo {
+    /// Whether charging is allowed at the optionally given location.
+    pub allowed: AllowedType,
+    /// The complete Token object for which authorization was requested.
+    pub token: Token,
+    /// Filtered location reference (only EVSEs the driver may use), when provided.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub location: Option<LocationReferences>,
+    /// Authorization reference returned by the eMSP (echoed in Session/CDR).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub authorization_reference: Option<CiString36>,
+    /// Optional display text with additional information for the EV driver.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub info: Option<DisplayText>,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1981,5 +2107,279 @@ mod tests {
         );
         assert!((tariff.elements[0].price_components[1].price - 2.00).abs() < f64::EPSILON);
         assert_eq!(tariff.elements[0].price_components[1].step_size, 300);
+    }
+
+    // ── WhitelistType ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn whitelist_type_serde_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&WhitelistType::Always).unwrap(),
+            "\"ALWAYS\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WhitelistType::Allowed).unwrap(),
+            "\"ALLOWED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WhitelistType::AllowedOffline).unwrap(),
+            "\"ALLOWED_OFFLINE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WhitelistType::Never).unwrap(),
+            "\"NEVER\""
+        );
+    }
+
+    #[test]
+    fn whitelist_type_roundtrip() {
+        for v in [
+            WhitelistType::Always,
+            WhitelistType::Allowed,
+            WhitelistType::AllowedOffline,
+            WhitelistType::Never,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: WhitelistType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    // ── AllowedType ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn allowed_type_serde_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&AllowedType::Allowed).unwrap(),
+            "\"ALLOWED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AllowedType::NoCredit).unwrap(),
+            "\"NO_CREDIT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AllowedType::NotAllowed).unwrap(),
+            "\"NOT_ALLOWED\""
+        );
+    }
+
+    #[test]
+    fn allowed_type_roundtrip() {
+        for v in [
+            AllowedType::Allowed,
+            AllowedType::Blocked,
+            AllowedType::Expired,
+            AllowedType::NoCredit,
+            AllowedType::NotAllowed,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: AllowedType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    // ── EnergyContract ────────────────────────────────────────────────────────
+
+    #[test]
+    fn energy_contract_roundtrip_full() {
+        let ec = EnergyContract {
+            supplier_name: "GreenPower B.V.".into(),
+            contract_id: Some("EC-NL-42".into()),
+        };
+        let json = serde_json::to_string(&ec).unwrap();
+        let back: EnergyContract = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ec);
+    }
+
+    #[test]
+    fn energy_contract_contract_id_absent_when_none() {
+        let ec = EnergyContract {
+            supplier_name: "GreenPower B.V.".into(),
+            contract_id: None,
+        };
+        let json = serde_json::to_string(&ec).unwrap();
+        assert!(!json.contains("contract_id"));
+        let back: EnergyContract = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ec);
+    }
+
+    // ── LocationReferences ────────────────────────────────────────────────────
+
+    #[test]
+    fn location_references_roundtrip_with_evses() {
+        let lr = LocationReferences {
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uids: vec![
+                CiString36::try_from("3256").unwrap(),
+                CiString36::try_from("3257").unwrap(),
+            ],
+        };
+        let json = serde_json::to_string(&lr).unwrap();
+        let back: LocationReferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, lr);
+    }
+
+    #[test]
+    fn location_references_evse_uids_empty_omitted() {
+        let lr = LocationReferences {
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uids: vec![],
+        };
+        let json = serde_json::to_string(&lr).unwrap();
+        assert!(!json.contains("evse_uids"));
+        let back: LocationReferences = serde_json::from_str(&json).unwrap();
+        assert!(back.evse_uids.is_empty());
+    }
+
+    // ── Token ─────────────────────────────────────────────────────────────────
+
+    fn make_token() -> Token {
+        Token {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("TNM").unwrap(),
+            uid: CiString36::try_from("012345678").unwrap(),
+            token_type: TokenType::Rfid,
+            contract_id: CiString36::try_from("NL8ACC12E46L89").unwrap(),
+            visual_number: Some("DF000-2001-8999-1".into()),
+            issuer: "TheNewMotion".into(),
+            group_id: None,
+            valid: true,
+            whitelist: WhitelistType::Allowed,
+            language: None,
+            default_profile_type: None,
+            energy_contract: None,
+            last_updated: "2015-06-29T22:39:09Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn token_serde_roundtrip() {
+        let t = make_token();
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Token = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn token_type_field_renamed_to_type_on_wire() {
+        let t = make_token();
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(
+            json.contains("\"type\":\"RFID\""),
+            "wire name must be 'type': {json}"
+        );
+        assert!(
+            !json.contains("token_type"),
+            "Rust field name must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn token_optional_fields_absent_when_none() {
+        let t = make_token();
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("group_id"));
+        assert!(!json.contains("language"));
+        assert!(!json.contains("default_profile_type"));
+        assert!(!json.contains("energy_contract"));
+    }
+
+    #[test]
+    fn token_spec_example_app_user() {
+        // Representative APP_USER token based on mod_tokens.asciidoc §Examples.
+        let json = r#"{
+            "country_code": "NL",
+            "party_id": "TNM",
+            "uid": "APP_USER_123456789",
+            "type": "APP_USER",
+            "contract_id": "NL8ACC12E46L89",
+            "visual_number": "DF000-2001-8999-1",
+            "issuer": "TheNewMotion",
+            "group_id": "DF000-2001-8999",
+            "valid": true,
+            "whitelist": "NEVER",
+            "language": "it",
+            "default_profile_type": "GREEN",
+            "last_updated": "2015-06-29T22:39:09Z"
+        }"#;
+        let t: Token = serde_json::from_str(json).unwrap();
+        assert_eq!(t.token_type, TokenType::AppUser);
+        assert_eq!(t.whitelist, WhitelistType::Never);
+        assert_eq!(t.default_profile_type, Some(ProfileType::Green));
+        assert_eq!(t.language.as_deref(), Some("it"));
+        assert!(t.valid);
+        assert!(t.energy_contract.is_none());
+    }
+
+    #[test]
+    fn token_spec_example_full_rfid_with_energy_contract() {
+        // Full RFID token with energy contract, based on mod_tokens.asciidoc §Examples.
+        let json = r#"{
+            "country_code": "NL",
+            "party_id": "TNM",
+            "uid": "012345678",
+            "type": "RFID",
+            "contract_id": "NL8ACC12E46L89",
+            "visual_number": "DF000-2001-8999-1",
+            "issuer": "TheNewMotion",
+            "valid": true,
+            "whitelist": "ALLOWED",
+            "energy_contract": {
+                "supplier_name": "Greenpeace Energy eG",
+                "contract_id": "0123456789"
+            },
+            "last_updated": "2015-06-29T22:39:09Z"
+        }"#;
+        let t: Token = serde_json::from_str(json).unwrap();
+        assert_eq!(t.token_type, TokenType::Rfid);
+        assert_eq!(t.whitelist, WhitelistType::Allowed);
+        let ec = t.energy_contract.as_ref().unwrap();
+        assert_eq!(ec.supplier_name, "Greenpeace Energy eG");
+        assert_eq!(ec.contract_id.as_deref(), Some("0123456789"));
+    }
+
+    // ── AuthorizationInfo ─────────────────────────────────────────────────────
+
+    #[test]
+    fn authorization_info_roundtrip_minimal() {
+        let ai = AuthorizationInfo {
+            allowed: AllowedType::Allowed,
+            token: make_token(),
+            location: None,
+            authorization_reference: None,
+            info: None,
+        };
+        let json = serde_json::to_string(&ai).unwrap();
+        let back: AuthorizationInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ai);
+        assert!(!json.contains("location"));
+        assert!(!json.contains("authorization_reference"));
+        assert!(!json.contains("\"info\""));
+    }
+
+    #[test]
+    fn authorization_info_roundtrip_full() {
+        let ai = AuthorizationInfo {
+            allowed: AllowedType::Allowed,
+            token: make_token(),
+            location: Some(LocationReferences {
+                location_id: CiString36::try_from("LOC1").unwrap(),
+                evse_uids: vec![CiString36::try_from("3256").unwrap()],
+            }),
+            authorization_reference: Some(CiString36::try_from("AUTH-REF-001").unwrap()),
+            info: Some(DisplayText {
+                language: "en".into(),
+                text: "Welcome!".into(),
+            }),
+        };
+        let json = serde_json::to_string(&ai).unwrap();
+        let back: AuthorizationInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allowed, AllowedType::Allowed);
+        assert_eq!(back.location.as_ref().unwrap().evse_uids.len(), 1);
+        assert_eq!(
+            back.authorization_reference.as_ref().map(|s| s.as_str()),
+            Some("AUTH-REF-001")
+        );
+        assert_eq!(back.info.as_ref().unwrap().language, "en");
     }
 }

@@ -5,6 +5,29 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 (run 3) — M5 Token data types (issue #43)
+
+- **Issue #43:** M5: Token data types — `Token`, `EnergyContract`, `AuthorizationInfo`, `LocationReferences`, `WhitelistType`, `AllowedType`, `CiString64`
+- **Branch:** `claude/sweet-hopper-jia9cz`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (192 total, +15 new Token tests) `deny check` ✅ (no new deps; cargo-deny not installed locally, trusted CI)
+- **What shipped:**
+  - `CiString64` type alias added to `ocpi-types::common` (same pattern as `CiString36`)
+  - `WhitelistType` enum (4 variants: ALWAYS, ALLOWED, ALLOWED_OFFLINE, NEVER)
+  - `AllowedType` enum (5 variants: ALLOWED, BLOCKED, EXPIRED, NO_CREDIT, NOT_ALLOWED)
+  - `EnergyContract` struct (supplier_name: String, contract_id: Option<String>) — spec uses `string(64)` not `CiString(64)`, so plain `String`
+  - `LocationReferences` struct (location_id: CiString36, evse_uids: Vec<CiString36> with default+skip_serializing_if)
+  - `Token` struct (14 fields; `token_type` via `#[serde(rename = "type")]`; `visual_number`/`issuer`/`language` as plain `String` per spec's `string(64/64/2)` types)
+  - `AuthorizationInfo` struct (allowed, token, optional location/auth_reference/info)
+  - All new types re-exported from `ocpi-types` crate root
+  - 15 new tests: enum serde, struct roundtrips, omitempty behavior, spec example JSONs
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human, gate ✅), PR #31 (needs-human, all CI ✅). PR #46 (#42 Tariff types) was already merged. Both human PRs need owner merge before #29, #30, #33 can proceed.
+- **`string` vs `CiString` for `visual_number`/`issuer`:** The spec uses `string(64)` (UTF-8, no case constraint) for these Token fields. Issue #43 suggested `CiString64` but the vendored spec is the source of truth — plain `String` is correct. `CiString64` alias is still added to common for future use by any actual `CiString(64)` spec fields.
+- **`Token` derives `Eq`**: no `f64` fields; `DateTime<Utc>` and all CiString/enum/bool fields are `Eq`. The full `AuthorizationInfo` chain is also `Eq`.
+- **Next:** #44 (M5 Tariffs server handler + client) or #45 (M5 Tokens server handler + client, depends on #43 merging). Both are P2. Alternatively #33 (M2 credentials fetch-back, P1) once PR #24 merges.
+
+---
+
 ## 2026-06-12 (run 2) — fix CI + M5 Tariff data types (issue #42)
 
 - **Primary task:** Fix PR #24 MSRV CI failure — `clap_builder 4.6.0` uses `edition2024`, incompatible with Cargo 1.82. Pushed MSRV bump (1.82 → 1.86) and removed `continue-on-error: true` from msrv job to PR #24's branch (`nightly/2026-06-11-issue-22`). Matches calibration already in PR #31.
