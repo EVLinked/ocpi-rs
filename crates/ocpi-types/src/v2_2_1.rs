@@ -1012,6 +1012,205 @@ pub struct AuthorizationInfo {
     pub info: Option<DisplayText>,
 }
 
+// ── Commands ──────────────────────────────────────────────────────────────────
+
+/// The type of command sent from the eMSP (Sender) to the CPO (Receiver).
+///
+/// Used as a URL path segment in the Commands receiver interface:
+/// `POST {commands_endpoint_url}{command}`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CommandType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CommandType {
+    /// Request the Charge Point to cancel a specific reservation.
+    CancelReservation,
+    /// Request the Charge Point to reserve an EVSE for a Token.
+    ReserveNow,
+    /// Request the Charge Point to start a transaction on the given EVSE/Connector.
+    StartSession,
+    /// Request the Charge Point to stop an ongoing session.
+    StopSession,
+    /// Request the Charge Point to unlock a connector (helpdesk/operator only).
+    UnlockConnector,
+}
+
+/// CPO's immediate response to a command request from the eMSP.
+///
+/// This is the direct acknowledgment from the Receiver (CPO), **not** the
+/// final result from the Charge Point. The Charge Point result arrives
+/// asynchronously via `POST` on the Sender interface.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CommandResponseType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CommandResponseType {
+    /// The requested command is not supported by this CPO, Charge Point, or EVSE.
+    NotSupported,
+    /// Command request rejected by the CPO.
+    Rejected,
+    /// Command request accepted by the CPO (does not mean Charge Point succeeded).
+    Accepted,
+    /// The session referenced in the command is not known by this CPO.
+    UnknownSession,
+}
+
+/// Result of a command execution at the Charge Point (asynchronous delivery).
+///
+/// Sent by the CPO via `POST` to the `response_url` provided in the original
+/// command object after the Charge Point has responded.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CommandResultType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CommandResultType {
+    /// Command request accepted and successfully executed by the Charge Point.
+    Accepted,
+    /// The reservation has been canceled by the CPO.
+    CanceledReservation,
+    /// EVSE is currently occupied; cannot start a new session.
+    EvseOccupied,
+    /// EVSE is currently inoperative or faulted.
+    EvseInoperative,
+    /// Execution of the command failed at the Charge Point.
+    Failed,
+    /// The requested command is not supported by this Charge Point or EVSE.
+    NotSupported,
+    /// Command request rejected by the Charge Point.
+    Rejected,
+    /// No response received from the Charge Point within a reasonable time.
+    Timeout,
+    /// The reservation referenced in the command is not known by the Charge Point.
+    UnknownReservation,
+}
+
+/// Request the CPO to cancel an existing reservation.
+///
+/// The `reservation_id` must match the ID used in the original `ReserveNow`
+/// command. Canceling a reservation may still result in a CDR for the
+/// reservation cost.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CancelReservation object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReservation {
+    /// URL the `CommandResult` POST should be sent to (eMSP-chosen, unique per request).
+    pub response_url: Url,
+    /// Reservation ID to cancel (must match the `reservation_id` from `ReserveNow`).
+    pub reservation_id: CiString36,
+}
+
+/// Request the CPO to reserve an EVSE at a Location for a Token.
+///
+/// The `reservation_id` is eMSP-scoped and **must not** be forwarded directly
+/// to the Charge Point — the CPO must use its own unique Charge Point reservation ID.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — ReserveNow object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReserveNow {
+    /// URL the `CommandResult` POST should be sent to.
+    pub response_url: Url,
+    /// Token object for how to reserve this Charge Point (pre-authorized by the eMSP).
+    pub token: Token,
+    /// When this reservation expires (UTC).
+    pub expiry_date: DateTime<Utc>,
+    /// Unique reservation ID (eMSP-scoped; CPO must not expose to Charge Point).
+    pub reservation_id: CiString36,
+    /// `Location.id` of the Location (at the CPO) to reserve.
+    pub location_id: CiString36,
+    /// Optional `EVSE.uid` to reserve a specific EVSE; if absent the CPO keeps one free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evse_uid: Option<CiString36>,
+    /// eMSP authorization reference included in the resulting Session/CDR when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_reference: Option<CiString36>,
+}
+
+/// Request the CPO to start a charging session at a Location/EVSE.
+///
+/// The Token is pre-authorized by the eMSP; the CPO **must not** re-validate it.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — StartSession object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartSession {
+    /// URL the `CommandResult` POST should be sent to.
+    pub response_url: Url,
+    /// Token the Charge Point must use to start the session (pre-authorized by the eMSP).
+    pub token: Token,
+    /// `Location.id` of the Location (at the CPO) on which to start a session.
+    pub location_id: CiString36,
+    /// Optional `EVSE.uid` (required when `connector_id` is also set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evse_uid: Option<CiString36>,
+    /// Optional `Connector.id` (required when `START_SESSION_CONNECTOR_REQUIRED` capability is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<CiString36>,
+    /// eMSP authorization reference included in the resulting Session/CDR when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_reference: Option<CiString36>,
+}
+
+/// Request the CPO to stop an ongoing charging session.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — StopSession object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopSession {
+    /// URL the `CommandResult` POST should be sent to.
+    pub response_url: Url,
+    /// `Session.id` of the session to stop.
+    pub session_id: CiString36,
+}
+
+/// Request the CPO to unlock a specific connector (helpdesk/operator use only).
+///
+/// **Warning:** This command must never be sent directly by an EV Driver.
+/// Use only when a connector fails to unlock after a transaction ends.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — UnlockConnector object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockConnector {
+    /// URL the `CommandResult` POST should be sent to.
+    pub response_url: Url,
+    /// `Location.id` of the Location.
+    pub location_id: CiString36,
+    /// `EVSE.uid` of the EVSE.
+    pub evse_uid: CiString36,
+    /// `Connector.id` to unlock.
+    pub connector_id: CiString36,
+}
+
+/// Immediate acknowledgment from the CPO to the eMSP's command request.
+///
+/// This is NOT the final result from the Charge Point. The Charge Point's
+/// response arrives asynchronously via `POST` on the Sender interface.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CommandResponse object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResponse {
+    /// CPO's response to the command request.
+    pub result: CommandResponseType,
+    /// Timeout in seconds — if no `CommandResult` arrives within this time,
+    /// the Sender may assume the command will never be delivered.
+    pub timeout: u32,
+    /// Optional human-readable description of the result (multiple languages).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message: Vec<DisplayText>,
+}
+
+/// Final result of a command from the Charge Point (asynchronous).
+///
+/// Delivered by the CPO via `POST` to the `response_url` from the original
+/// command object.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc` — CommandResult object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResult {
+    /// Result of the command execution at the Charge Point.
+    pub result: CommandResultType,
+    /// Optional human-readable reason (multiple languages).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message: Vec<DisplayText>,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2381,5 +2580,253 @@ mod tests {
             Some("AUTH-REF-001")
         );
         assert_eq!(back.info.as_ref().unwrap().language, "en");
+    }
+
+    // ── Commands ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn command_type_screaming_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&CommandType::CancelReservation).unwrap(),
+            "\"CANCEL_RESERVATION\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandType::ReserveNow).unwrap(),
+            "\"RESERVE_NOW\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandType::StartSession).unwrap(),
+            "\"START_SESSION\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandType::StopSession).unwrap(),
+            "\"STOP_SESSION\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandType::UnlockConnector).unwrap(),
+            "\"UNLOCK_CONNECTOR\""
+        );
+    }
+
+    #[test]
+    fn command_type_deserialize_all() {
+        let pairs = [
+            ("\"CANCEL_RESERVATION\"", CommandType::CancelReservation),
+            ("\"RESERVE_NOW\"", CommandType::ReserveNow),
+            ("\"START_SESSION\"", CommandType::StartSession),
+            ("\"STOP_SESSION\"", CommandType::StopSession),
+            ("\"UNLOCK_CONNECTOR\"", CommandType::UnlockConnector),
+        ];
+        for (s, expected) in pairs {
+            let got: CommandType = serde_json::from_str(s).unwrap();
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn command_response_type_screaming_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&CommandResponseType::NotSupported).unwrap(),
+            "\"NOT_SUPPORTED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandResponseType::Rejected).unwrap(),
+            "\"REJECTED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandResponseType::Accepted).unwrap(),
+            "\"ACCEPTED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandResponseType::UnknownSession).unwrap(),
+            "\"UNKNOWN_SESSION\""
+        );
+    }
+
+    #[test]
+    fn command_result_type_screaming_snake_case() {
+        let cases = [
+            (CommandResultType::Accepted, "\"ACCEPTED\""),
+            (
+                CommandResultType::CanceledReservation,
+                "\"CANCELED_RESERVATION\"",
+            ),
+            (CommandResultType::EvseOccupied, "\"EVSE_OCCUPIED\""),
+            (CommandResultType::EvseInoperative, "\"EVSE_INOPERATIVE\""),
+            (CommandResultType::Failed, "\"FAILED\""),
+            (CommandResultType::NotSupported, "\"NOT_SUPPORTED\""),
+            (CommandResultType::Rejected, "\"REJECTED\""),
+            (CommandResultType::Timeout, "\"TIMEOUT\""),
+            (
+                CommandResultType::UnknownReservation,
+                "\"UNKNOWN_RESERVATION\"",
+            ),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cancel_reservation_roundtrip() {
+        let cmd = CancelReservation {
+            response_url: Url::try_from("https://emsp.example.com/commands/1234").unwrap(),
+            reservation_id: CiString36::try_from("RES-001").unwrap(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: CancelReservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn stop_session_roundtrip() {
+        let cmd = StopSession {
+            response_url: Url::try_from("https://emsp.example.com/commands/stop/42").unwrap(),
+            session_id: CiString36::try_from("SESSION-XYZ-123").unwrap(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: StopSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn unlock_connector_roundtrip() {
+        let cmd = UnlockConnector {
+            response_url: Url::try_from("https://emsp.example.com/commands/unlock/7").unwrap(),
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uid: CiString36::try_from("3256").unwrap(),
+            connector_id: CiString36::try_from("1").unwrap(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: UnlockConnector = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn start_session_optional_fields_omitted() {
+        let cmd = StartSession {
+            response_url: Url::try_from("https://emsp.example.com/commands/start/99").unwrap(),
+            token: make_token(),
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uid: None,
+            connector_id: None,
+            authorization_reference: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // optional fields absent from JSON when None
+        assert!(!json.contains("evse_uid"));
+        assert!(!json.contains("connector_id"));
+        assert!(!json.contains("authorization_reference"));
+        let back: StartSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn start_session_optional_fields_present() {
+        let cmd = StartSession {
+            response_url: Url::try_from("https://emsp.example.com/commands/start/100").unwrap(),
+            token: make_token(),
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uid: Some(CiString36::try_from("3256").unwrap()),
+            connector_id: Some(CiString36::try_from("1").unwrap()),
+            authorization_reference: Some(CiString36::try_from("AUTH-REF-XYZ").unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("evse_uid"));
+        assert!(json.contains("connector_id"));
+        assert!(json.contains("authorization_reference"));
+        let back: StartSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn reserve_now_optional_fields_omitted() {
+        use chrono::TimeZone;
+        let cmd = ReserveNow {
+            response_url: Url::try_from("https://emsp.example.com/commands/reserve/5").unwrap(),
+            token: make_token(),
+            expiry_date: Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap(),
+            reservation_id: CiString36::try_from("RES-42").unwrap(),
+            location_id: CiString36::try_from("LOC1").unwrap(),
+            evse_uid: None,
+            authorization_reference: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(!json.contains("evse_uid"));
+        assert!(!json.contains("authorization_reference"));
+        let back: ReserveNow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn command_response_empty_message_omitted() {
+        let resp = CommandResponse {
+            result: CommandResponseType::Accepted,
+            timeout: 30,
+            message: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("message"));
+        let back: CommandResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn command_response_with_message() {
+        let resp = CommandResponse {
+            result: CommandResponseType::Rejected,
+            timeout: 0,
+            message: vec![DisplayText {
+                language: "en".into(),
+                text: "Token not authorized for this location.".into(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("message"));
+        let back: CommandResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.result, CommandResponseType::Rejected);
+        assert_eq!(back.message.len(), 1);
+        assert_eq!(back.message[0].language, "en");
+    }
+
+    #[test]
+    fn command_result_roundtrip() {
+        let result = CommandResult {
+            result: CommandResultType::EvseOccupied,
+            message: vec![DisplayText {
+                language: "nl".into(),
+                text: "Laadpaal bezet.".into(),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CommandResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, result);
+    }
+
+    /// Spec-style JSON: POST /commands/START_SESSION body.
+    #[test]
+    fn start_session_spec_example_json() {
+        let json = r#"{
+            "response_url": "https://www.server.com/ocpi/emsp/2.2.1/commands/START_SESSION/1234",
+            "token": {
+                "country_code": "NL",
+                "party_id": "TNM",
+                "uid": "012345678",
+                "type": "RFID",
+                "contract_id": "NL8ACC12E46L89",
+                "issuer": "TheNewMotion",
+                "valid": true,
+                "whitelist": "ALLOWED",
+                "last_updated": "2015-06-29T22:39:09Z"
+            },
+            "location_id": "LOC1",
+            "evse_uid": "3256"
+        }"#;
+        let cmd: StartSession = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.location_id.as_str(), "LOC1");
+        assert_eq!(cmd.evse_uid.as_ref().unwrap().as_str(), "3256");
+        assert_eq!(cmd.token.token_type, TokenType::Rfid);
+        assert!(cmd.connector_id.is_none());
+        assert!(cmd.authorization_reference.is_none());
     }
 }
