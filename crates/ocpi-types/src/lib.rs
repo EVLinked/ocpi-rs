@@ -51,4 +51,8 @@ pub use common::{
 pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
+pub use v2_2_1::{
+    AuthMethod, CdrDimension, CdrDimensionType, CdrToken, ChargingPeriod, ChargingPreferences,
+    ChargingPreferencesResponse, ProfileType, Session, SessionStatus, TokenType,
+};
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
