@@ -28,6 +28,13 @@ pub enum ClientError {
     /// Corresponds to OCPI status code `3002` (`UnsupportedVersion`).
     #[error("no mutual OCPI version: remote and local version sets do not overlap")]
     NoMutualVersion,
+
+    /// The requested resource was not found on the remote party.
+    ///
+    /// Typically returned when the remote responds with OCPI status code
+    /// `2003` (`UnknownLocation`) or HTTP 404.
+    #[error("resource not found on remote")]
+    NotFound,
 }
 
 #[cfg(test)]
@@ -38,5 +45,11 @@ mod tests {
     fn no_mutual_version_displays_correctly() {
         let err = ClientError::NoMutualVersion;
         assert!(err.to_string().contains("no mutual OCPI version"));
+    }
+
+    #[test]
+    fn not_found_displays_correctly() {
+        let err = ClientError::NotFound;
+        assert!(err.to_string().contains("not found"));
     }
 }

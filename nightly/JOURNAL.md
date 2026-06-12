@@ -5,6 +5,17 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-12 — M4: Sessions server handler + axum router + client methods (issue #36)
+
+- **Issue:** #36 — `SessionsHandler` trait, `SessionsConfig` (RwLock store, RFC 7396 merge-patch), `sessions_router()`, `ClientError::NotFound`, 5 client methods
+- **Branch:** `claude/sweet-hopper-sxrnpt`
+- **CI:** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (159 tests, +26 new) `deny check` ✅
+- **No Cargo.lock changes.** Moved `serde_json` from dev-dep → dep in `ocpi-types` (already locked) and re-exported `chrono`/`serde`/`serde_json` from there; downstream crates use re-exports instead of new direct deps.
+- **Sync note:** PR #24 and PR #31 still open (`needs-human`). This PR is auto-merge eligible (RISK=low).
+- **Next:** #29 (M3: Locations server handler) — blocked on PR #31 (Locations types) merging.
+
+---
+
 ## 2026-06-12 — M4: Sessions data types + shared CDR primitives (issue #34)
 
 - **Issue:** #34 — M4: Sessions data types — Session, ChargingPreferences, shared ChargingPeriod/CdrDimension types

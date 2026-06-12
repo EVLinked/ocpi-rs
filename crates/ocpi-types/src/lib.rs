@@ -57,3 +57,9 @@ pub use v2_2_1::{
     ProfileType, Session, SessionStatus, SignedData, SignedValue, Tariff, TokenType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
+
+// Re-export common third-party types so downstream crates can use them
+// without declaring direct dependencies on these packages.
+pub use chrono::{self, DateTime, Utc};
+pub use serde;
+pub use serde_json;
