@@ -4,6 +4,26 @@ Durable, project-specific lessons. Read at the start of every run. Add an entry
 when you discover something that would save the next run time or a failed CI
 cycle. Keep entries short and specific. Prune contradictions.
 
+## Workflow & PR hygiene
+
+- **NEVER bundle a `.github/`/Cargo guarded-path change into a feature PR.** PRs #31
+  (Locations types + MSRV) and #24 (credentials router + MSRV) each stapled an MSRV
+  `.github` change onto pure-additive implementation work. Result: both got `needs-human`,
+  the owner didn't merge immediately, and they went `dirty` as `main` advanced — blocking
+  M3 entirely for ~5 runs. **Keep guarded-path changes (CI/MSRV/deps/LICENSE/scripts) in
+  their OWN PR** so implementation work stays auto-mergeable. The MSRV job is
+  `continue-on-error: true` on `main` (non-blocking), so its calibration is never urgent.
+- **Rescuing a rotted/`dirty` nightly PR: re-deliver, don't merge-resolve.** When a stuck
+  PR is pure-additive (new types/modules), the fastest clean fix is to re-apply just the
+  net-new content on a fresh branch off current `main` and close the old PR as superseded —
+  NOT to resolve a 15+ region merge conflict. A blind `git cherry-pick` of the original
+  commit will conflict heavily because later milestones grew the same files.
+- **Before re-delivering old type work, grep `main` for the types first.** M4/M5/M6 added
+  `TokenType`, `ConnectorType`, `ConnectorFormat`, `PowerType` to `v2_2_1.rs` ahead of the
+  Locations module (Sessions/CDRs/Tokens referenced them). Re-applying an older Locations
+  commit that *defines* them causes duplicate-definition errors. Reuse what exists; add only
+  the genuinely missing types. `grep -nE '^pub (enum|struct) ' <file>` is the quick check.
+
 ## Toolchain & CI
 
 - **rustfmt.toml is stable-safe on purpose.** Do not add nightly-only options
