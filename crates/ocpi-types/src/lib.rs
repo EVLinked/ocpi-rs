@@ -52,17 +52,19 @@ pub use envelope::{OcpiPaged, OcpiResponse};
 pub use error::OcpiError;
 pub use status::OcpiStatusCode;
 pub use v2_2_1::{
-    ActiveChargingProfile, ActiveChargingProfileResult, AllowedType, AuthMethod, AuthorizationInfo,
-    CancelReservation, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod,
-    ChargingPreferences, ChargingPreferencesResponse, ChargingProfile, ChargingProfilePeriod,
-    ChargingProfileResponse, ChargingProfileResponseType, ChargingProfileResult,
-    ChargingProfileResultType, ChargingRateUnit, ClearProfileResult, ClientInfo, CommandResponse,
-    CommandResponseType, CommandResult, CommandResultType, CommandType, ConnectionStatus,
-    ConnectorFormat, ConnectorType, DayOfWeek, EnergyContract, LocationReferences, PowerType,
-    PriceComponent, ProfileType, ReservationRestrictionType, ReserveNow, Session, SessionStatus,
-    SetChargingProfile, SignedData, SignedValue, StartSession, StopSession, Tariff,
-    TariffDimensionType, TariffElement, TariffRestrictions, TariffType, Token, TokenType,
-    UnlockConnector, WhitelistType,
+    ActiveChargingProfile, ActiveChargingProfileResult, AdditionalGeoLocation, AllowedType,
+    AuthMethod, AuthorizationInfo, CancelReservation, Capability, Cdr, CdrDimension,
+    CdrDimensionType, CdrLocation, CdrToken, ChargingPeriod, ChargingPreferences,
+    ChargingPreferencesResponse, ChargingProfile, ChargingProfilePeriod, ChargingProfileResponse,
+    ChargingProfileResponseType, ChargingProfileResult, ChargingProfileResultType,
+    ChargingRateUnit, ClearProfileResult, ClientInfo, CommandResponse, CommandResponseType,
+    CommandResult, CommandResultType, CommandType, ConnectionStatus, Connector, ConnectorFormat,
+    ConnectorType, DayOfWeek, EnergyContract, Evse, ExceptionalPeriod, Facility, Hours,
+    ImageCategory, Location, LocationReferences, ParkingRestriction, ParkingType, PowerType,
+    PriceComponent, ProfileType, PublishTokenType, RegularHours, ReservationRestrictionType,
+    ReserveNow, Session, SessionStatus, SetChargingProfile, SignedData, SignedValue, StartSession,
+    Status, StatusSchedule, StopSession, Tariff, TariffDimensionType, TariffElement,
+    TariffRestrictions, TariffType, Token, TokenType, UnlockConnector, WhitelistType,
 };
 pub use version::{Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber};
 

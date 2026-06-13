@@ -5,6 +5,46 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-13 (run 10) — M3 Locations data types, clean re-delivery (issue #28)
+
+- **Issue #28:** M3: Locations data types — Location, EVSE, Connector, supporting enums.
+- **Branch:** `claude/dazzling-maxwell-4e2etm`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (192 ocpi-types tests, +12 new) `check --locked` ✅ (no dep changes)
+- **Context — why a re-delivery:** #28 was first implemented in PR #31, but that PR
+  **bundled a `.github/` MSRV calibration** (issue #12) into the same branch, making it
+  `needs-human`, and then went `dirty` (merge-conflict) as M4/M5/M6 squash-merged into
+  `main` and grew `v2_2_1.rs`/`lib.rs`. The foundational Locations types were stuck behind
+  a guarded-path change and a 17-region merge conflict — blocking all of M3 (#29, #30, #32)
+  for ~5 runs while the routine skipped ahead to M4–M6.
+- **What I did:** Re-delivered **only** the Locations types cleanly on top of current `main`,
+  with **no `.github`/Cargo changes** → auto-merge eligible (no `needs-human`).
+  - **Did NOT redefine** `TokenType`, `ConnectorType`, `ConnectorFormat`, `PowerType` —
+    M4/M5/M6 already added these to `v2_2_1.rs` (Sessions/CDRs/Tokens needed them). The
+    Locations objects **reuse** the existing shared enums. This was the whole source of the
+    cherry-pick conflict: PR #31 predates those definitions and redefines them.
+  - **Added 15 new types:** `Status`, `Capability`, `Facility`, `ImageCategory`,
+    `ParkingRestriction`, `ParkingType`, `AdditionalGeoLocation`, `RegularHours`,
+    `ExceptionalPeriod`, `Hours`, `StatusSchedule`, `PublishTokenType`, `Connector`, `Evse`,
+    `Location`. Added `Image` to the `common` import; re-exported all 15 from the crate root.
+  - **12 tests:** Status/ParkingType/Facility serde, Connector/Evse/Location round-trips,
+    optional-field omission, `Hours` 24/7, `PublishTokenType` (`"type"` rename → `RFID`).
+    Dropped PR #31's `connector_type_mixed_case_serde`/`power_type_serde_roundtrip` tests —
+    those enums already live in `main` with their own coverage, and PR #31 used
+    pre-existing variant spellings (`Iec603092Single16`) that differ from `main`
+    (`Iec6030921Single16`).
+- **Superseded PR #31:** commented + closed it as superseded (clean re-delivery of #28
+  here; MSRV issue #12 left open for separate handling — it's non-blocking,
+  `continue-on-error: true` on `main`).
+- **Sync:** PR #24 (M2 credentials router) still `needs-human`/`dirty` — same bundling
+  pathology (it carries an MSRV `.github` change + 9-region `lib.rs` conflict). Left for a
+  future clean re-delivery of #22 (same recipe: re-apply just the router on current main, no
+  `.github`).
+- **Next:** #29 (M3 Locations server handler + `locations_router()`, P1) — now unblocked on
+  `main` once this merges. Then #30 (client methods). Consider re-delivering #22 cleanly to
+  un-stick M2.
+
+---
+
 ## 2026-06-13 (run 9) — M6 ChargingProfiles data types (issue #56)
 
 - **Issue #56:** M6: ChargingProfiles data types — ChargingProfile, ActiveChargingProfile, SetChargingProfile, result/response enums
