@@ -1211,6 +1211,44 @@ pub struct CommandResult {
     pub message: Vec<DisplayText>,
 }
 
+// ── HubClientInfo ─────────────────────────────────────────────────────────────
+
+/// Connection status of a party that is (or will be) connected to a Hub.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_hub_client_info.asciidoc` §Data types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConnectionStatus {
+    /// Party is connected and reachable.
+    Connected,
+    /// Party is currently not connected; do not send requests.
+    Offline,
+    /// Connection is planned but the party has never connected yet.
+    Planned,
+    /// Party is no longer active and will never connect again.
+    Suspended,
+}
+
+/// Connection status record for a party connected to a Hub.
+///
+/// The Hub owns these objects and pushes them to connected parties via
+/// `PUT /clientinfo/{country_code}/{party_id}`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_hub_client_info.asciidoc` §Object description
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientInfo {
+    /// eMI3 party identifier (3-char), as used in the credentials exchange.
+    pub party_id: CiString3,
+    /// ISO 3166-1 alpha-2 country code, as used in the credentials exchange.
+    pub country_code: CiString2,
+    /// The role this party fulfils in the OCPI ecosystem.
+    pub role: Role,
+    /// Current connection status of the party.
+    pub status: ConnectionStatus,
+    /// Timestamp when this `ClientInfo` object was last updated.
+    pub last_updated: DateTime<Utc>,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2828,5 +2866,54 @@ mod tests {
         assert_eq!(cmd.token.token_type, TokenType::Rfid);
         assert!(cmd.connector_id.is_none());
         assert!(cmd.authorization_reference.is_none());
+    }
+
+    // ── HubClientInfo tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn connection_status_screaming_snake_case() {
+        let cases = [
+            (ConnectionStatus::Connected, "\"CONNECTED\""),
+            (ConnectionStatus::Offline, "\"OFFLINE\""),
+            (ConnectionStatus::Planned, "\"PLANNED\""),
+            (ConnectionStatus::Suspended, "\"SUSPENDED\""),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
+            let back: ConnectionStatus = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn client_info_roundtrip() {
+        use chrono::TimeZone;
+        let info = ClientInfo {
+            party_id: CiString3::try_from("ALL").unwrap(),
+            country_code: CiString2::try_from("NL").unwrap(),
+            role: Role::Cpo,
+            status: ConnectionStatus::Planned,
+            last_updated: Utc.with_ymd_and_hms(2019, 1, 28, 12, 0, 0).unwrap(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ClientInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, info);
+    }
+
+    /// Spec example: PUT /clientinfo/NL/ALL body.
+    #[test]
+    fn client_info_spec_example_json() {
+        let json = r#"{
+            "country_code": "NL",
+            "party_id": "ALL",
+            "role": "CPO",
+            "status": "PLANNED",
+            "last_updated": "2019-01-28T12:00:00Z"
+        }"#;
+        let info: ClientInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.country_code.as_str(), "NL");
+        assert_eq!(info.party_id.as_str(), "ALL");
+        assert_eq!(info.role, Role::Cpo);
+        assert_eq!(info.status, ConnectionStatus::Planned);
     }
 }

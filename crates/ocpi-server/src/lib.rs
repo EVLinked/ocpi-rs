@@ -12,9 +12,9 @@
 
 use ocpi_types::{
     v2_2_1::{
-        AuthorizationInfo, CancelReservation, Cdr, CommandResponse, CommandResponseType,
-        CommandResult, CommandType, Credentials, LocationReferences, ReserveNow, Session,
-        StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
+        AuthorizationInfo, CancelReservation, Cdr, ClientInfo, CommandResponse,
+        CommandResponseType, CommandResult, CommandType, Credentials, LocationReferences,
+        ReserveNow, Session, StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
     },
     version::{Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
@@ -1307,6 +1307,163 @@ impl CommandsHandler for CommandsConfig {
     }
 }
 
+// ── HubClientInfoHandler ──────────────────────────────────────────────────────
+
+/// Handles the OCPI HubClientInfo module endpoints.
+///
+/// This is a **Configuration Module** — OCPI routing headers
+/// (`OCPI-to/from-party-id/country-code`) are **not** used on these endpoints.
+///
+/// The Hub pushes `ClientInfo` objects to connected parties (Receiver
+/// interface: PUT/GET). Connected parties can also pull the full list from
+/// the Hub (Sender interface: GET paginated).
+///
+/// Spec: `specs/ocpi/2.2.1/mod_hub_client_info.asciidoc`
+#[allow(async_fn_in_trait)]
+pub trait HubClientInfoHandler {
+    /// Retrieve a single `ClientInfo` object as stored in the local system.
+    ///
+    /// Receiver interface: `GET /clientinfo/{country_code}/{party_id}`.
+    ///
+    /// Returns `Ok(None)` when no entry exists for that party.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn get_client_info(
+        &self,
+        country_code: &str,
+        party_id: &str,
+    ) -> Result<Option<ClientInfo>, ServerError>;
+
+    /// Store a new or updated `ClientInfo` object pushed by the Hub.
+    ///
+    /// Receiver interface: `PUT /clientinfo/{country_code}/{party_id}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn put_client_info(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        info: ClientInfo,
+    ) -> Result<(), ServerError>;
+}
+
+// ── HubClientInfoConfig ───────────────────────────────────────────────────────
+
+/// Thread-safe in-memory HubClientInfo store for use with
+/// [`http::hub_client_info_router`].
+///
+/// Entries are keyed by `"{country_code}/{party_id}"`. Wrap in `Arc` to share
+/// across axum handlers or multiple threads.
+pub struct HubClientInfoConfig {
+    entries: std::sync::RwLock<std::collections::HashMap<String, ClientInfo>>,
+}
+
+impl std::fmt::Debug for HubClientInfoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubClientInfoConfig")
+            .field(
+                "entry_count",
+                &self.entries.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl HubClientInfoConfig {
+    /// Create an empty HubClientInfo store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn composite_key(country_code: &str, party_id: &str) -> String {
+        format!("{country_code}/{party_id}")
+    }
+
+    /// Insert or replace a `ClientInfo` entry.
+    pub fn put(&self, country_code: &str, party_id: &str, info: ClientInfo) {
+        let key = Self::composite_key(country_code, party_id);
+        self.entries
+            .write()
+            .expect("lock not poisoned")
+            .insert(key, info);
+    }
+
+    /// Retrieve a `ClientInfo` entry by its key.
+    #[must_use]
+    pub fn get(&self, country_code: &str, party_id: &str) -> Option<ClientInfo> {
+        let key = Self::composite_key(country_code, party_id);
+        self.entries
+            .read()
+            .expect("lock not poisoned")
+            .get(&key)
+            .cloned()
+    }
+
+    /// Return a filtered and paginated slice of all `ClientInfo` entries.
+    ///
+    /// Filters by `last_updated >= date_from` and (if provided)
+    /// `last_updated < date_to`. Results are sorted by `last_updated`.
+    ///
+    /// Returns `(page_items, total_matching_count)`.
+    #[must_use]
+    pub fn list(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<ClientInfo>, u32) {
+        let map = self.entries.read().expect("lock not poisoned");
+        let mut filtered: Vec<&ClientInfo> = map
+            .values()
+            .filter(|c| c.last_updated >= date_from && date_to.is_none_or(|dt| c.last_updated < dt))
+            .collect();
+        filtered.sort_by_key(|c| c.last_updated);
+        let total = filtered.len() as u32;
+        let page: Vec<ClientInfo> = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        (page, total)
+    }
+}
+
+impl Default for HubClientInfoConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl HubClientInfoHandler for HubClientInfoConfig {
+    async fn get_client_info(
+        &self,
+        country_code: &str,
+        party_id: &str,
+    ) -> Result<Option<ClientInfo>, ServerError> {
+        Ok(self.get(country_code, party_id))
+    }
+
+    async fn put_client_info(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        info: ClientInfo,
+    ) -> Result<(), ServerError> {
+        self.put(country_code, party_id, info);
+        Ok(())
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -1349,17 +1506,17 @@ pub mod http {
         envelope::{OcpiPaged, OcpiResponse},
         transport::PaginatedParams,
         v2_2_1::{
-            AuthorizationInfo, CancelReservation, Cdr, CommandResponse, CommandResult, CommandType,
-            LocationReferences, ReserveNow, Session, StartSession, StopSession, Tariff, Token,
-            TokenType, UnlockConnector,
+            AuthorizationInfo, CancelReservation, Cdr, ClientInfo, CommandResponse, CommandResult,
+            CommandType, LocationReferences, ReserveNow, Session, StartSession, StopSession,
+            Tariff, Token, TokenType, UnlockConnector,
         },
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
     use crate::{
-        token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, ServerError, SessionsConfig,
-        TariffsConfig, TokensConfig, VersionsConfig,
+        token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, HubClientInfoConfig,
+        ServerError, SessionsConfig, TariffsConfig, TokensConfig, VersionsConfig,
     };
 
     // ── Versions ──────────────────────────────────────────────────────────────
@@ -2016,6 +2173,90 @@ pub mod http {
                 .into_response(),
         }
     }
+
+    // ── HubClientInfo ─────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI HubClientInfo module.
+    ///
+    /// This is a **Configuration Module** — OCPI routing headers are NOT
+    /// required on these endpoints.
+    ///
+    /// Exposes:
+    /// - `GET  /clientinfo` — paginated list (Sender/Hub interface)
+    /// - `GET  /clientinfo/{country_code}/{party_id}` — single entry (Receiver)
+    /// - `PUT  /clientinfo/{country_code}/{party_id}` — upsert (Receiver)
+    pub fn hub_client_info_router(config: Arc<HubClientInfoConfig>) -> Router {
+        Router::new()
+            .route("/clientinfo", get(hub_client_info_list))
+            .route(
+                "/clientinfo/{country_code}/{party_id}",
+                get(hub_client_info_get).put(hub_client_info_put),
+            )
+            .with_state(config)
+    }
+
+    async fn hub_client_info_list(
+        State(cfg): State<Arc<HubClientInfoConfig>>,
+        Query(params): Query<PaginatedParams>,
+    ) -> Response {
+        use ocpi_types::chrono::TimeZone as _;
+        let date_from = params.date_from.unwrap_or_else(|| {
+            ocpi_types::Utc
+                .with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
+                .single()
+                .expect("epoch is valid")
+        });
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        let (items, total) = cfg.list(date_from, params.date_to, offset, limit);
+        let page = OcpiPaged::new(items, offset, limit, total);
+        let next_offset = page.next_offset();
+        let body = page.into_response();
+
+        let mut response = Json(body).into_response();
+        let hdrs = response.headers_mut();
+        if let Ok(v) = total.to_string().parse() {
+            hdrs.insert("x-total-count", v);
+        }
+        if let Ok(v) = limit.to_string().parse() {
+            hdrs.insert("x-limit", v);
+        }
+        if let Some(next_off) = next_offset {
+            let link = format!("</clientinfo?offset={next_off}&limit={limit}>; rel=\"next\"");
+            if let Ok(v) = link.parse() {
+                hdrs.insert("link", v);
+            }
+        }
+
+        response
+    }
+
+    async fn hub_client_info_get(
+        State(cfg): State<Arc<HubClientInfoConfig>>,
+        Path((country_code, party_id)): Path<(String, String)>,
+    ) -> Response {
+        match cfg.get(&country_code, &party_id) {
+            Some(info) => Json(OcpiResponse::success(info)).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(OcpiResponse::<ClientInfo>::error(
+                    OcpiStatusCode::UnknownLocation,
+                    format!("no ClientInfo for {country_code}/{party_id}"),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn hub_client_info_put(
+        State(cfg): State<Arc<HubClientInfoConfig>>,
+        Path((country_code, party_id)): Path<(String, String)>,
+        Json(info): Json<ClientInfo>,
+    ) -> Response {
+        cfg.put(&country_code, &party_id, info);
+        Json(OcpiResponse::<ClientInfo>::success_empty()).into_response()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -2025,11 +2266,12 @@ mod tests {
     use super::*;
     use ocpi_types::chrono::TimeZone as _;
     use ocpi_types::{
+        common::{CiString2, CiString3, Role},
         v2_2_1::{
             AllowedType, AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken,
-            ChargingPeriod, ConnectorFormat, ConnectorType, PowerType, PriceComponent, Session,
-            SessionStatus, Tariff, TariffDimensionType, TariffElement, Token, TokenType,
-            WhitelistType,
+            ChargingPeriod, ClientInfo, ConnectionStatus, ConnectorFormat, ConnectorType,
+            PowerType, PriceComponent, Session, SessionStatus, Tariff, TariffDimensionType,
+            TariffElement, Token, TokenType, WhitelistType,
         },
         OcpiStatusCode,
     };
@@ -2680,5 +2922,90 @@ mod tests {
     #[test]
     fn commands_config_new_constructs_without_panic() {
         let _cfg = CommandsConfig::new();
+    }
+
+    // ── HubClientInfoConfig tests ─────────────────────────────────────────────
+
+    fn make_client_info(cc: &str, party: &str, role: Role, ts: DateTime<Utc>) -> ClientInfo {
+        ClientInfo {
+            country_code: CiString2::try_from(cc).unwrap(),
+            party_id: CiString3::try_from(party).unwrap(),
+            role,
+            status: ConnectionStatus::Connected,
+            last_updated: ts,
+        }
+    }
+
+    #[test]
+    fn hub_client_info_config_put_and_get_roundtrip() {
+        let cfg = HubClientInfoConfig::new();
+        let ts = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let info = make_client_info("NL", "CPO", Role::Cpo, ts);
+        cfg.put("NL", "CPO", info.clone());
+        let got = cfg.get("NL", "CPO").unwrap();
+        assert_eq!(got.country_code.as_str(), "NL");
+        assert_eq!(got.party_id.as_str(), "CPO");
+        assert_eq!(got.role, Role::Cpo);
+        assert_eq!(got.status, ConnectionStatus::Connected);
+    }
+
+    #[test]
+    fn hub_client_info_config_get_missing_returns_none() {
+        let cfg = HubClientInfoConfig::new();
+        assert!(cfg.get("DE", "MSP").is_none());
+    }
+
+    #[test]
+    fn hub_client_info_config_put_overwrites_existing() {
+        let cfg = HubClientInfoConfig::new();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", make_client_info("NL", "CPO", Role::Cpo, t1));
+        cfg.put(
+            "NL",
+            "CPO",
+            ClientInfo {
+                status: ConnectionStatus::Offline,
+                last_updated: t2,
+                ..make_client_info("NL", "CPO", Role::Cpo, t2)
+            },
+        );
+        let got = cfg.get("NL", "CPO").unwrap();
+        assert_eq!(got.status, ConnectionStatus::Offline);
+        assert_eq!(got.last_updated, t2);
+    }
+
+    #[test]
+    fn hub_client_info_config_list_pagination() {
+        let cfg = HubClientInfoConfig::new();
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", make_client_info("NL", "CPO", Role::Cpo, t1));
+        cfg.put("DE", "MSP", make_client_info("DE", "MSP", Role::Emsp, t2));
+        cfg.put("FR", "HUB", make_client_info("FR", "HUB", Role::Hub, t3));
+
+        let (page, total) = cfg.list(epoch, None, 0, 2);
+        assert_eq!(total, 3);
+        assert_eq!(page.len(), 2);
+
+        let (page2, total2) = cfg.list(epoch, None, 2, 2);
+        assert_eq!(total2, 3);
+        assert_eq!(page2.len(), 1);
+    }
+
+    #[test]
+    fn hub_client_info_config_list_filter_by_date_from() {
+        let cfg = HubClientInfoConfig::new();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        cfg.put("NL", "CPO", make_client_info("NL", "CPO", Role::Cpo, t1));
+        cfg.put("DE", "MSP", make_client_info("DE", "MSP", Role::Emsp, t2));
+
+        let cutoff = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(cutoff, None, 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].party_id.as_str(), "MSP");
     }
 }

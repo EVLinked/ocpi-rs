@@ -5,6 +5,30 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-13 (run 8) — M6 HubClientInfo data types + server handler (issue #52)
+
+- **Issue #52:** M6: HubClientInfo data types + server handler
+- **Branch:** `claude/sweet-hopper-p0fkit`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (233 total, +8 new HubClientInfo tests)
+- **What shipped:**
+  - `ConnectionStatus` enum (4 variants: CONNECTED, OFFLINE, PLANNED, SUSPENDED) — SCREAMING_SNAKE_CASE serde
+  - `ClientInfo` struct (country_code: CiString2, party_id: CiString3, role: Role, status: ConnectionStatus, last_updated: DateTime) — spec-faithful field types
+  - Both re-exported from `ocpi-types` crate root
+  - `HubClientInfoHandler` trait (2 async methods: `get_client_info`, `put_client_info`)
+  - `HubClientInfoConfig` in-memory store — `RwLock<HashMap<String, ClientInfo>>` keyed by `"{country_code}/{party_id}"`; `new()`, `put()`, `get()`, `list(date_from, date_to, offset, limit)`
+  - `hub_client_info_router(Arc<HubClientInfoConfig>) -> Router` (axum feature) — 3 routes:
+    - `GET /clientinfo` → paginated list with X-Total-Count/X-Limit/Link headers (Sender/Hub interface)
+    - `GET /clientinfo/{country_code}/{party_id}` → single ClientInfo or 404
+    - `PUT /clientinfo/{country_code}/{party_id}` → upsert
+  - No OCPI routing headers — HubClientInfo is a Configuration Module (not Functional)
+  - 3 new tests in ocpi-types: ConnectionStatus SCREAMING_SNAKE_CASE, ClientInfo roundtrip, spec example JSON
+  - 5 new tests in ocpi-server: put+get roundtrip, get-missing→None, put-overwrites, list-pagination, list-filter-by-date_from
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human), PR #31 (needs-human). Both awaiting owner action; no review comments.
+- **Key design decision:** Store key is `"{country_code}/{party_id}"` (not `"{country_code}/{party_id}/{role}"`). The spec's GET/PUT path is `/{country_code}/{party_id}` with no role segment — one entry per party pair, role is stored in the value.
+- **M6 status:** All 3 M6 issues now implemented (#50 Commands types ✅, #51 Commands server+client ✅, #52 HubClientInfo ✅). M6 appears complete pending owner's milestone closure.
+- **Next:** M3 unblocks when PR #31 merges → #29 (Locations server handler, P1) or #30 (Locations client, P2). M2 unblocks when PR #24 merges → #33 (Credentials fetch-back, P1). If both remain blocked: groom M7 (ChargingProfiles) or open a question issue about milestone completion.
+
 ## 2026-06-13 (run 7) — M6 Commands server handler + client (issue #51)
 
 - **Issue #51:** M6: Commands server handler + client
