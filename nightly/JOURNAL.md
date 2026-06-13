@@ -5,6 +5,29 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-13 (run 7) — M6 Commands server handler + client (issue #51)
+
+- **Issue #51:** M6: Commands server handler + client
+- **Branch:** `claude/sweet-hopper-o42ez3`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (167 total, 2 new CommandsConfig tests)
+- **What shipped:**
+  - `CommandsHandler` trait (6 async methods: handle_cancel_reservation, handle_reserve_now, handle_start_session, handle_stop_session, handle_unlock_connector, receive_command_result)
+  - `CommandsConfig` unit struct — stateless default impl returning `NOT_SUPPORTED` for all commands; `not_supported_response()` public static helper
+  - `http::commands_router(Arc<CommandsConfig>) -> Router` (axum feature) — 6 routes:
+    - `POST /commands/CANCEL_RESERVATION` → cmds_cancel_reservation
+    - `POST /commands/RESERVE_NOW` → cmds_reserve_now
+    - `POST /commands/START_SESSION` → cmds_start_session
+    - `POST /commands/STOP_SESSION` → cmds_stop_session
+    - `POST /commands/UNLOCK_CONNECTOR` → cmds_unlock_connector
+    - `POST /commands/{command_type}/result` → cmds_receive_result (async result callback)
+  - `OcpiClient` 6 new methods: `cancel_reservation`, `reserve_now`, `start_session`, `stop_session`, `unlock_connector`, `post_command_result`
+  - Command sender methods use private `post_command()` helper; type segment derived from `serde_json::to_value(CommandType)` to stay DRY
+  - `post_command_result` POSTs `CommandResult` to an arbitrary `response_url` (second phase of async Commands flow)
+  - 2 sync tests: `not_supported_response_has_correct_fields`, `new_constructs_without_panic`
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Sync:** PR #24 (needs-human), PR #31 (needs-human). Both awaiting owner action; no review comments to respond to.
+- **Next:** After PR #31 merges — #29 (M3: Locations server handler). After PR #24 merges — #33 (M2: credentials fetch-back). #52 (HubClientInfo, P2) is independent.
+
 ## 2026-06-12 (run 6) — M6 Commands data types (issue #50)
 
 - **Issue #50:** M6: Commands data types — CommandType, CommandResponseType, CommandResultType, CancelReservation, ReserveNow, StartSession, StopSession, UnlockConnector, CommandResponse, CommandResult
