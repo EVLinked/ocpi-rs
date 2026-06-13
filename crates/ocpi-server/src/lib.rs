@@ -12,7 +12,9 @@
 
 use ocpi_types::{
     v2_2_1::{
-        AuthorizationInfo, Cdr, Credentials, LocationReferences, Session, Tariff, Token, TokenType,
+        AuthorizationInfo, CancelReservation, Cdr, CommandResponse, CommandResponseType,
+        CommandResult, CommandType, Credentials, LocationReferences, ReserveNow, Session,
+        StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
     },
     version::{Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
@@ -1156,6 +1158,155 @@ impl TokensHandler for TokensConfig {
     }
 }
 
+// ── CommandsHandler ───────────────────────────────────────────────────────────
+
+/// Handles the OCPI Commands module endpoints.
+///
+/// Implements the **receiver** interface (CPO receives commands from eMSP) and
+/// the **sender** interface (eMSP receives async `CommandResult` callbacks from the CPO).
+///
+/// The two-phase flow: eMSP sends a command to CPO (receiver), CPO acknowledges
+/// immediately with a [`CommandResponse`], then asynchronously POSTs a
+/// [`CommandResult`] back to the `response_url` the eMSP included in the command.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_commands.asciidoc`
+#[allow(async_fn_in_trait)]
+pub trait CommandsHandler {
+    /// Receive a `CANCEL_RESERVATION` command — receiver interface
+    /// (`POST /commands/CANCEL_RESERVATION`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the command cannot be forwarded to the Charge Point.
+    async fn handle_cancel_reservation(
+        &self,
+        cmd: CancelReservation,
+    ) -> Result<CommandResponse, ServerError>;
+
+    /// Receive a `RESERVE_NOW` command — receiver interface
+    /// (`POST /commands/RESERVE_NOW`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the command cannot be forwarded to the Charge Point.
+    async fn handle_reserve_now(&self, cmd: ReserveNow) -> Result<CommandResponse, ServerError>;
+
+    /// Receive a `START_SESSION` command — receiver interface
+    /// (`POST /commands/START_SESSION`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the command cannot be forwarded to the Charge Point.
+    async fn handle_start_session(&self, cmd: StartSession)
+        -> Result<CommandResponse, ServerError>;
+
+    /// Receive a `STOP_SESSION` command — receiver interface
+    /// (`POST /commands/STOP_SESSION`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the command cannot be forwarded to the Charge Point.
+    async fn handle_stop_session(&self, cmd: StopSession) -> Result<CommandResponse, ServerError>;
+
+    /// Receive an `UNLOCK_CONNECTOR` command — receiver interface
+    /// (`POST /commands/UNLOCK_CONNECTOR`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the command cannot be forwarded to the Charge Point.
+    async fn handle_unlock_connector(
+        &self,
+        cmd: UnlockConnector,
+    ) -> Result<CommandResponse, ServerError>;
+
+    /// Receive the asynchronous result from the Charge Point — sender interface
+    /// (`POST /commands/{command_type}/result`).
+    ///
+    /// The CPO delivers this after the Charge Point has executed (or failed to
+    /// execute) the command. The `response_url` in each command object points here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the result cannot be processed.
+    async fn receive_command_result(
+        &self,
+        command_type: CommandType,
+        result: CommandResult,
+    ) -> Result<(), ServerError>;
+}
+
+// ── CommandsConfig ────────────────────────────────────────────────────────────
+
+/// Stateless placeholder Commands handler for use with [`http::commands_router`].
+///
+/// Returns [`CommandResponseType::NotSupported`] for every incoming command.
+/// Replace with a concrete bridge implementation when real CPO/OCPP integration
+/// is needed; implement [`CommandsHandler`] on your own type and wire it to an
+/// axum state of `Arc<YourType>`.
+#[derive(Debug, Default)]
+pub struct CommandsConfig;
+
+impl CommandsConfig {
+    /// Create a new `CommandsConfig` placeholder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Returns the default "not supported" [`CommandResponse`].
+    ///
+    /// Used by the placeholder implementation and useful as a starting point
+    /// when overriding specific commands.
+    #[must_use]
+    pub fn not_supported_response() -> CommandResponse {
+        CommandResponse {
+            result: CommandResponseType::NotSupported,
+            timeout: 30,
+            message: vec![],
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl CommandsHandler for CommandsConfig {
+    async fn handle_cancel_reservation(
+        &self,
+        _cmd: CancelReservation,
+    ) -> Result<CommandResponse, ServerError> {
+        Ok(Self::not_supported_response())
+    }
+
+    async fn handle_reserve_now(&self, _cmd: ReserveNow) -> Result<CommandResponse, ServerError> {
+        Ok(Self::not_supported_response())
+    }
+
+    async fn handle_start_session(
+        &self,
+        _cmd: StartSession,
+    ) -> Result<CommandResponse, ServerError> {
+        Ok(Self::not_supported_response())
+    }
+
+    async fn handle_stop_session(&self, _cmd: StopSession) -> Result<CommandResponse, ServerError> {
+        Ok(Self::not_supported_response())
+    }
+
+    async fn handle_unlock_connector(
+        &self,
+        _cmd: UnlockConnector,
+    ) -> Result<CommandResponse, ServerError> {
+        Ok(Self::not_supported_response())
+    }
+
+    async fn receive_command_result(
+        &self,
+        _command_type: CommandType,
+        _result: CommandResult,
+    ) -> Result<(), ServerError> {
+        Ok(())
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -1197,14 +1348,18 @@ pub mod http {
     use ocpi_types::{
         envelope::{OcpiPaged, OcpiResponse},
         transport::PaginatedParams,
-        v2_2_1::{AuthorizationInfo, Cdr, LocationReferences, Session, Tariff, Token, TokenType},
+        v2_2_1::{
+            AuthorizationInfo, CancelReservation, Cdr, CommandResponse, CommandResult, CommandType,
+            LocationReferences, ReserveNow, Session, StartSession, StopSession, Tariff, Token,
+            TokenType, UnlockConnector,
+        },
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
     use crate::{
-        token_type_str, CdrsConfig, ServerError, SessionsConfig, TariffsConfig, TokensConfig,
-        VersionsConfig,
+        token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, ServerError, SessionsConfig,
+        TariffsConfig, TokensConfig, VersionsConfig,
     };
 
     // ── Versions ──────────────────────────────────────────────────────────────
@@ -1710,6 +1865,152 @@ pub mod http {
                 Json(OcpiResponse::<AuthorizationInfo>::error(
                     OcpiStatusCode::ServerError,
                     "internal error",
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    // ── Commands ──────────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI Commands module.
+    ///
+    /// Exposes:
+    /// - `POST /commands/CANCEL_RESERVATION` — receiver (CPO)
+    /// - `POST /commands/RESERVE_NOW` — receiver (CPO)
+    /// - `POST /commands/START_SESSION` — receiver (CPO)
+    /// - `POST /commands/STOP_SESSION` — receiver (CPO)
+    /// - `POST /commands/UNLOCK_CONNECTOR` — receiver (CPO)
+    /// - `POST /commands/{command_type}/result` — sender result callback (eMSP)
+    ///
+    /// The default [`CommandsConfig`] responds `NOT_SUPPORTED` to every command.
+    /// Wire a custom implementation for real CPO/OCPP bridging.
+    pub fn commands_router(config: Arc<CommandsConfig>) -> Router {
+        Router::new()
+            .route(
+                "/commands/CANCEL_RESERVATION",
+                post(cmds_cancel_reservation),
+            )
+            .route("/commands/RESERVE_NOW", post(cmds_reserve_now))
+            .route("/commands/START_SESSION", post(cmds_start_session))
+            .route("/commands/STOP_SESSION", post(cmds_stop_session))
+            .route("/commands/UNLOCK_CONNECTOR", post(cmds_unlock_connector))
+            .route("/commands/{command_type}/result", post(cmds_receive_result))
+            .with_state(config)
+    }
+
+    async fn cmds_cancel_reservation(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Json(cmd): Json<CancelReservation>,
+    ) -> Response {
+        match cfg.handle_cancel_reservation(cmd).await {
+            Ok(resp) => Json(OcpiResponse::success(resp)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResponse>::error(
+                    e.status_code(),
+                    e.to_string(),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cmds_reserve_now(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Json(cmd): Json<ReserveNow>,
+    ) -> Response {
+        match cfg.handle_reserve_now(cmd).await {
+            Ok(resp) => Json(OcpiResponse::success(resp)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResponse>::error(
+                    e.status_code(),
+                    e.to_string(),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cmds_start_session(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Json(cmd): Json<StartSession>,
+    ) -> Response {
+        match cfg.handle_start_session(cmd).await {
+            Ok(resp) => Json(OcpiResponse::success(resp)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResponse>::error(
+                    e.status_code(),
+                    e.to_string(),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cmds_stop_session(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Json(cmd): Json<StopSession>,
+    ) -> Response {
+        match cfg.handle_stop_session(cmd).await {
+            Ok(resp) => Json(OcpiResponse::success(resp)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResponse>::error(
+                    e.status_code(),
+                    e.to_string(),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cmds_unlock_connector(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Json(cmd): Json<UnlockConnector>,
+    ) -> Response {
+        match cfg.handle_unlock_connector(cmd).await {
+            Ok(resp) => Json(OcpiResponse::success(resp)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResponse>::error(
+                    e.status_code(),
+                    e.to_string(),
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn cmds_receive_result(
+        State(cfg): State<Arc<CommandsConfig>>,
+        Path(command_type_str): Path<String>,
+        Json(result): Json<CommandResult>,
+    ) -> Response {
+        let command_type = match ocpi_types::serde_json::from_value::<CommandType>(
+            ocpi_types::serde_json::Value::String(command_type_str.clone()),
+        ) {
+            Ok(ct) => ct,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OcpiResponse::<CommandResponse>::error(
+                        OcpiStatusCode::InvalidParameters,
+                        format!("unknown command type: {command_type_str}"),
+                    )),
+                )
+                    .into_response()
+            }
+        };
+        match cfg.receive_command_result(command_type, result).await {
+            Ok(()) => Json(OcpiResponse::<CommandResult>::success_empty()).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OcpiResponse::<CommandResult>::error(
+                    e.status_code(),
+                    e.to_string(),
                 )),
             )
                 .into_response(),
@@ -2364,5 +2665,20 @@ mod tests {
         let err = cfg.authorize("UNKNOWN", TokenType::Rfid, None).unwrap_err();
         assert!(matches!(err, ServerError::UnknownToken));
         assert_eq!(err.status_code(), OcpiStatusCode::UnknownToken);
+    }
+
+    // ── CommandsConfig tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn commands_config_not_supported_response_has_correct_fields() {
+        let resp = CommandsConfig::not_supported_response();
+        assert_eq!(resp.result, CommandResponseType::NotSupported);
+        assert_eq!(resp.timeout, 30);
+        assert!(resp.message.is_empty());
+    }
+
+    #[test]
+    fn commands_config_new_constructs_without_panic() {
+        let _cfg = CommandsConfig::new();
     }
 }

@@ -16,8 +16,10 @@ pub use error::ClientError;
 use ocpi_types::{
     transport::{CredentialToken, PaginatedParams, PaginationMeta},
     v2_2_1::{
-        AuthorizationInfo, Cdr, ChargingPreferences, ChargingPreferencesResponse, Credentials,
-        LocationReferences, Session, Tariff, Token, TokenType,
+        AuthorizationInfo, CancelReservation, Cdr, ChargingPreferences,
+        ChargingPreferencesResponse, CommandResponse, CommandResult, CommandType, Credentials,
+        LocationReferences, ReserveNow, Session, StartSession, StopSession, Tariff, Token,
+        TokenType, UnlockConnector,
     },
     version::{Version, VersionDetails, VersionNumber},
     OcpiResponse,
@@ -970,6 +972,130 @@ impl OcpiClient {
         let response = response.error_for_status()?;
         let envelope: OcpiResponse<AuthorizationInfo> = response.json().await?;
         envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    // ── Commands ──────────────────────────────────────────────────────────────
+
+    async fn post_command<B: ocpi_types::serde::Serialize>(
+        &self,
+        commands_url: &str,
+        command_type: CommandType,
+        body: &B,
+    ) -> Result<CommandResponse, ClientError> {
+        let type_str = ocpi_types::serde_json::to_value(command_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let url = format!("{}/{}", commands_url.trim_end_matches('/'), type_str);
+        let parsed = url::Url::parse(&url)?;
+        let response = self
+            .http
+            .post(parsed)
+            .header("Authorization", self.auth_header_value())
+            .json(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let envelope: OcpiResponse<CommandResponse> = response.json().await?;
+        envelope.data.ok_or(ClientError::EmptyData)
+    }
+
+    /// Send a `CANCEL_RESERVATION` command to a CPO's commands endpoint.
+    ///
+    /// `commands_url` is the absolute base URL (e.g. `https://cpo.example/ocpi/2.2.1/commands`).
+    /// The method type segment (`/CANCEL_RESERVATION`) is appended automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the response carries no data.
+    pub async fn cancel_reservation(
+        &self,
+        commands_url: &str,
+        cmd: CancelReservation,
+    ) -> Result<CommandResponse, ClientError> {
+        self.post_command(commands_url, CommandType::CancelReservation, &cmd)
+            .await
+    }
+
+    /// Send a `RESERVE_NOW` command to a CPO's commands endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the response carries no data.
+    pub async fn reserve_now(
+        &self,
+        commands_url: &str,
+        cmd: ReserveNow,
+    ) -> Result<CommandResponse, ClientError> {
+        self.post_command(commands_url, CommandType::ReserveNow, &cmd)
+            .await
+    }
+
+    /// Send a `START_SESSION` command to a CPO's commands endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the response carries no data.
+    pub async fn start_session(
+        &self,
+        commands_url: &str,
+        cmd: StartSession,
+    ) -> Result<CommandResponse, ClientError> {
+        self.post_command(commands_url, CommandType::StartSession, &cmd)
+            .await
+    }
+
+    /// Send a `STOP_SESSION` command to a CPO's commands endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the response carries no data.
+    pub async fn stop_session(
+        &self,
+        commands_url: &str,
+        cmd: StopSession,
+    ) -> Result<CommandResponse, ClientError> {
+        self.post_command(commands_url, CommandType::StopSession, &cmd)
+            .await
+    }
+
+    /// Send an `UNLOCK_CONNECTOR` command to a CPO's commands endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the response carries no data.
+    pub async fn unlock_connector(
+        &self,
+        commands_url: &str,
+        cmd: UnlockConnector,
+    ) -> Result<CommandResponse, ClientError> {
+        self.post_command(commands_url, CommandType::UnlockConnector, &cmd)
+            .await
+    }
+
+    /// POST a [`CommandResult`] to the eMSP's `response_url` (the async callback).
+    ///
+    /// This is the second phase of the Commands flow: after the CPO has forwarded
+    /// the command to the Charge Point, it POSTs the final result back to the
+    /// `response_url` that the eMSP included in the original command body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] if the request fails or the URL is invalid.
+    pub async fn post_command_result(
+        &self,
+        response_url: &str,
+        result: CommandResult,
+    ) -> Result<(), ClientError> {
+        let parsed = url::Url::parse(response_url)?;
+        self.http
+            .post(parsed)
+            .header("Authorization", self.auth_header_value())
+            .json(&result)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }
 
