@@ -1249,6 +1249,154 @@ pub struct ClientInfo {
     pub last_updated: DateTime<Utc>,
 }
 
+// ── ChargingProfiles ──────────────────────────────────────────────────────────
+
+/// Unit in which a charging profile power or current limit is expressed.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingRateUnit enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChargingRateUnit {
+    /// Watts — total allowed charging power. Convenient for DC charging.
+    #[serde(rename = "W")]
+    W,
+    /// Amperes per phase. Convenient for AC charging.
+    #[serde(rename = "A")]
+    A,
+}
+
+/// One time-slotted period in a [`ChargingProfile`].
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfilePeriod class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChargingProfilePeriod {
+    /// Start of the period in seconds from the start of the profile.
+    pub start_period: i32,
+    /// Charging rate limit during this period in the applicable [`ChargingRateUnit`].
+    /// Accepts at most one digit fraction (e.g. `8.1`).
+    pub limit: f64,
+}
+
+/// A list of charging periods that define power or current limits over time.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfile class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChargingProfile {
+    /// Starting point of an absolute profile. Absent → relative to start of charging.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start_date_time: Option<DateTime<Utc>>,
+    /// Duration of the profile in seconds. Absent → last period continues indefinitely.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration: Option<i32>,
+    /// Unit of measure for this profile.
+    pub charging_rate_unit: ChargingRateUnit,
+    /// Minimum charging rate the EV can accept. Accepts at most one digit fraction.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_charging_rate: Option<f64>,
+    /// List of periods defining power or current limits over time. Empty when absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charging_profile_period: Vec<ChargingProfilePeriod>,
+}
+
+/// The charging profile as currently calculated by the EVSE, accounting for all inputs.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ActiveChargingProfile class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveChargingProfile {
+    /// When the EVSE calculated this profile; all offsets are relative to this timestamp.
+    pub start_date_time: DateTime<Utc>,
+    /// The calculated charging profile.
+    pub charging_profile: ChargingProfile,
+}
+
+/// Body of a `PUT /chargingprofiles/{session_id}` request sent to the CPO receiver.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — SetChargingProfile object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetChargingProfile {
+    /// The charging profile to set on the EVSE.
+    pub charging_profile: ChargingProfile,
+    /// URL where the async [`ChargingProfileResult`] POST should be delivered.
+    pub response_url: Url,
+}
+
+/// CPO's immediate response to a ChargingProfile request.
+///
+/// This is the CPO's acknowledgment only — the actual Charge Point result
+/// arrives asynchronously via POST on `response_url`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfileResponse object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargingProfileResponse {
+    /// Whether the CPO accepted and forwarded the request to the EVSE.
+    pub result: ChargingProfileResponseType,
+    /// Seconds after which the SCSP may assume the async result will never arrive.
+    pub timeout: u32,
+}
+
+/// CPO-level response values for a ChargingProfile request.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfileResponseType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChargingProfileResponseType {
+    /// Request accepted; CPO is forwarding it to the EVSE.
+    Accepted,
+    /// ChargingProfiles are not supported by this CPO, Charge Point, or EVSE.
+    NotSupported,
+    /// Request rejected (e.g. session does not belong to the requesting party).
+    Rejected,
+    /// Requests are being sent too frequently; try again later.
+    TooOften,
+    /// The session ID is not known to this CPO.
+    UnknownSession,
+}
+
+/// Charge-Point-level outcome of a ChargingProfile operation.
+///
+/// Returned asynchronously by the CPO to the SCSP via POST on `response_url`.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfileResultType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChargingProfileResultType {
+    /// Charge Point accepted the profile.
+    Accepted,
+    /// Charge Point rejected the profile.
+    Rejected,
+    /// No matching charging profile was found by the Charge Point.
+    Unknown,
+}
+
+/// Async result of a `GET ActiveChargingProfile` request, sent by CPO to SCSP.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ActiveChargingProfileResult object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveChargingProfileResult {
+    /// Whether the Charge Point was able to return the active profile.
+    pub result: ChargingProfileResultType,
+    /// The active profile, present only when `result == ACCEPTED`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub profile: Option<ActiveChargingProfile>,
+}
+
+/// Async result of a `PUT SetChargingProfile` request, sent by CPO to SCSP.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ChargingProfileResult object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargingProfileResult {
+    /// Whether the Charge Point processed the new/updated profile.
+    pub result: ChargingProfileResultType,
+}
+
+/// Async result of a `DELETE ClearProfile` request, sent by CPO to SCSP.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_charging_profiles.asciidoc` — ClearProfileResult object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearProfileResult {
+    /// Whether the Charge Point processed the profile removal.
+    pub result: ChargingProfileResultType,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2915,5 +3063,225 @@ mod tests {
         assert_eq!(info.party_id.as_str(), "ALL");
         assert_eq!(info.role, Role::Cpo);
         assert_eq!(info.status, ConnectionStatus::Planned);
+    }
+
+    // ── ChargingProfiles tests ────────────────────────────────────────────────
+
+    #[test]
+    fn charging_rate_unit_serde() {
+        assert_eq!(
+            serde_json::to_string(&ChargingRateUnit::W).unwrap(),
+            "\"W\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChargingRateUnit::A).unwrap(),
+            "\"A\""
+        );
+        let w: ChargingRateUnit = serde_json::from_str("\"W\"").unwrap();
+        let a: ChargingRateUnit = serde_json::from_str("\"A\"").unwrap();
+        assert_eq!(w, ChargingRateUnit::W);
+        assert_eq!(a, ChargingRateUnit::A);
+    }
+
+    #[test]
+    fn charging_profile_response_type_screaming_snake_case() {
+        let cases = [
+            (ChargingProfileResponseType::Accepted, "\"ACCEPTED\""),
+            (
+                ChargingProfileResponseType::NotSupported,
+                "\"NOT_SUPPORTED\"",
+            ),
+            (ChargingProfileResponseType::Rejected, "\"REJECTED\""),
+            (ChargingProfileResponseType::TooOften, "\"TOO_OFTEN\""),
+            (
+                ChargingProfileResponseType::UnknownSession,
+                "\"UNKNOWN_SESSION\"",
+            ),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
+            let back: ChargingProfileResponseType = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn charging_profile_result_type_screaming_snake_case() {
+        let cases = [
+            (ChargingProfileResultType::Accepted, "\"ACCEPTED\""),
+            (ChargingProfileResultType::Rejected, "\"REJECTED\""),
+            (ChargingProfileResultType::Unknown, "\"UNKNOWN\""),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
+            let back: ChargingProfileResultType = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn charging_profile_period_roundtrip() {
+        let period = ChargingProfilePeriod {
+            start_period: 0,
+            limit: 16.0,
+        };
+        let json = serde_json::to_string(&period).unwrap();
+        let back: ChargingProfilePeriod = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, period);
+    }
+
+    #[test]
+    fn charging_profile_optional_fields_omitted() {
+        let profile = ChargingProfile {
+            start_date_time: None,
+            duration: None,
+            charging_rate_unit: ChargingRateUnit::A,
+            min_charging_rate: None,
+            charging_profile_period: vec![],
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(!json.contains("start_date_time"));
+        assert!(!json.contains("duration"));
+        assert!(!json.contains("min_charging_rate"));
+        assert!(!json.contains("charging_profile_period"));
+        let back: ChargingProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, profile);
+    }
+
+    #[test]
+    fn charging_profile_with_periods_roundtrip() {
+        let profile = ChargingProfile {
+            start_date_time: None,
+            duration: Some(900),
+            charging_rate_unit: ChargingRateUnit::W,
+            min_charging_rate: Some(1.4),
+            charging_profile_period: vec![
+                ChargingProfilePeriod {
+                    start_period: 0,
+                    limit: 3680.0,
+                },
+                ChargingProfilePeriod {
+                    start_period: 300,
+                    limit: 2300.0,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        let back: ChargingProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, profile);
+    }
+
+    #[test]
+    fn set_charging_profile_roundtrip() {
+        let set_profile = SetChargingProfile {
+            charging_profile: ChargingProfile {
+                start_date_time: None,
+                duration: Some(600),
+                charging_rate_unit: ChargingRateUnit::A,
+                min_charging_rate: None,
+                charging_profile_period: vec![ChargingProfilePeriod {
+                    start_period: 0,
+                    limit: 16.0,
+                }],
+            },
+            response_url: Url::try_from(
+                "https://www.server.com/ocpi/2.2.1/chargingprofiles/result",
+            )
+            .unwrap(),
+        };
+        let json = serde_json::to_string(&set_profile).unwrap();
+        let back: SetChargingProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, set_profile);
+    }
+
+    #[test]
+    fn charging_profile_response_roundtrip() {
+        let resp = ChargingProfileResponse {
+            result: ChargingProfileResponseType::Accepted,
+            timeout: 30,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ChargingProfileResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn active_charging_profile_result_with_profile() {
+        use chrono::TimeZone;
+        let result = ActiveChargingProfileResult {
+            result: ChargingProfileResultType::Accepted,
+            profile: Some(ActiveChargingProfile {
+                start_date_time: Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap(),
+                charging_profile: ChargingProfile {
+                    start_date_time: None,
+                    duration: Some(900),
+                    charging_rate_unit: ChargingRateUnit::W,
+                    min_charging_rate: None,
+                    charging_profile_period: vec![ChargingProfilePeriod {
+                        start_period: 0,
+                        limit: 3680.0,
+                    }],
+                },
+            }),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ActiveChargingProfileResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn active_charging_profile_result_no_profile_omitted() {
+        let result = ActiveChargingProfileResult {
+            result: ChargingProfileResultType::Unknown,
+            profile: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("profile"));
+        let back: ActiveChargingProfileResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn charging_profile_result_and_clear_profile_result_roundtrip() {
+        let cp = ChargingProfileResult {
+            result: ChargingProfileResultType::Accepted,
+        };
+        let clear = ClearProfileResult {
+            result: ChargingProfileResultType::Rejected,
+        };
+        let j1 = serde_json::to_string(&cp).unwrap();
+        let j2 = serde_json::to_string(&clear).unwrap();
+        let b1: ChargingProfileResult = serde_json::from_str(&j1).unwrap();
+        let b2: ClearProfileResult = serde_json::from_str(&j2).unwrap();
+        assert_eq!(b1, cp);
+        assert_eq!(b2, clear);
+    }
+
+    /// Spec-style JSON: PUT /chargingprofiles/{session_id} body.
+    #[test]
+    fn set_charging_profile_spec_example_json() {
+        let json = r#"{
+            "charging_profile": {
+                "duration": 900,
+                "charging_rate_unit": "W",
+                "charging_profile_period": [
+                    { "start_period": 0, "limit": 3680 },
+                    { "start_period": 300, "limit": 3500 }
+                ]
+            },
+            "response_url": "https://www.msp.com/ocpi/2.2.1/chargingprofiles/response?request_id=5678"
+        }"#;
+        let sp: SetChargingProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(sp.charging_profile.charging_rate_unit, ChargingRateUnit::W);
+        assert_eq!(sp.charging_profile.duration, Some(900));
+        assert_eq!(sp.charging_profile.charging_profile_period.len(), 2);
+        assert_eq!(
+            sp.charging_profile.charging_profile_period[0].start_period,
+            0
+        );
+        assert!(
+            (sp.charging_profile.charging_profile_period[0].limit - 3680.0).abs() < f64::EPSILON
+        );
+        assert!(sp.charging_profile.start_date_time.is_none());
     }
 }

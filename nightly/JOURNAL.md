@@ -5,6 +5,33 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-13 (run 9) — M6 ChargingProfiles data types (issue #56)
+
+- **Issue #56:** M6: ChargingProfiles data types — ChargingProfile, ActiveChargingProfile, SetChargingProfile, result/response enums
+- **Branch:** `claude/stoic-shannon-h48jf9`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (245 total, +11 new ChargingProfiles tests)
+- **What shipped:**
+  - `ChargingRateUnit` enum (2 variants: W, A) — explicit `#[serde(rename)]` for single-letter uppercase wire values
+  - `ChargingProfileResponseType` enum (5 variants: ACCEPTED, NOT_SUPPORTED, REJECTED, TOO_OFTEN, UNKNOWN_SESSION) — SCREAMING_SNAKE_CASE
+  - `ChargingProfileResultType` enum (3 variants: ACCEPTED, REJECTED, UNKNOWN) — SCREAMING_SNAKE_CASE
+  - `ChargingProfilePeriod` struct (`start_period: i32`, `limit: f64`)
+  - `ChargingProfile` struct (5 fields: optional `start_date_time`, optional `duration`, `charging_rate_unit`, optional `min_charging_rate`, `charging_profile_period: Vec<ChargingProfilePeriod>`)
+  - `ActiveChargingProfile` struct (`start_date_time: DateTime`, `charging_profile: ChargingProfile`)
+  - `SetChargingProfile` struct (`charging_profile: ChargingProfile`, `response_url: Url`)
+  - `ChargingProfileResponse` struct (`result: ChargingProfileResponseType`, `timeout: u32`) — Eq derivable
+  - `ActiveChargingProfileResult` struct (`result: ChargingProfileResultType`, optional `profile: ActiveChargingProfile`)
+  - `ChargingProfileResult` struct — Eq derivable
+  - `ClearProfileResult` struct — Eq derivable
+  - All 11 types re-exported from `ocpi-types` crate root
+  - 11 new tests: enum serde, struct roundtrips, optional-field omission, spec-example JSON
+- **No Cargo.toml changes.** (No `needs-human` flag; auto-merge eligible.)
+- **Groomed M6:** Created issues #56 (ChargingProfiles types, P1) and #57 (ChargingProfiles server+client, P1) — M6 was incomplete without ChargingProfiles.
+- **Sync:** PR #24 (needs-human, dirty — merge conflict in lib.rs), PR #31 (needs-human, all CI ✅). Both awaiting owner action. 3rd open nightly PR is justified: both existing are `needs-human` with no blocking CI failures or review comments.
+- **Key design decision:** `ChargingRateUnit` uses explicit `#[serde(rename = "W")]` / `#[serde(rename = "A")]` — single-letter values that don't need SCREAMING_SNAKE_CASE transformation but also can't rely on derive defaults.
+- **f64 fields:** `limit` in `ChargingProfilePeriod` and `min_charging_rate` in `ChargingProfile` are `f64`, which prevents `Eq` on those structs and their containers. `ChargingProfileResponse`, `ChargingProfileResult`, and `ClearProfileResult` have no `f64` and derive `Eq`.
+- **M6 status:** ChargingProfiles types ✅. Still needed: #57 (ChargingProfiles server+client). HubClientInfo and Commands are on main.
+- **Next:** #57 (M6: ChargingProfiles server handler + client) — blocked only until this PR merges. M3 #29 (Locations server) unblocks once PR #31 merges; M2 #33 (Credentials fetch-back) unblocks once PR #24 merges.
+
 ## 2026-06-13 (run 8) — M6 HubClientInfo data types + server handler (issue #52)
 
 - **Issue #52:** M6: HubClientInfo data types + server handler

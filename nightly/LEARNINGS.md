@@ -43,6 +43,8 @@ cycle. Keep entries short and specific. Prune contradictions.
 
 ## OCPI domain
 
+- **Single-letter enum values (e.g. `W`, `A`) need explicit `#[serde(rename = "...")]`**, not `rename_all`. SCREAMING_SNAKE_CASE would produce the same result for single-letter uppercase variants, but explicit renames make intent clear and prevent accidental breakage if a variant is renamed. Use `#[serde(rename = "W")]` on variant `W` (not `rename_all = "SCREAMING_SNAKE_CASE"`) when wire values are single uppercase letters.
+- **M6 is Commands + ChargingProfiles + HubClientInfo** per the README milestone ("M6 — Commands + ChargingProfiles + HubClientInfo → OCPI 2.2.1 complete"). ChargingProfiles was inadvertently skipped in runs 6-8. Always diff README milestones vs implemented types when declaring a milestone complete.
 - **`status_code` is an integer in the body**, independent of the HTTP status.
   `1000` = success. Keep `OcpiStatusCode` ↔ `u16` mapping exhaustive.
 - **Version strings are dotted** (`"2.2.1"`); `VersionNumber` serializes via
