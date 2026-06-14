@@ -5,6 +5,56 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-14 (run 13) — M3 Locations receiver handler + axum router (issue #29)
+
+- **Issue #29:** Add the receiver-side Locations handler to `ocpi-server`
+  (`LocationsHandler` trait, `LocationsConfig` in-memory store, axum
+  `locations_router()`). P1, M3, owner-approved `nightly`. Foundation for #30
+  (client) and #32 (e2e smoke test). #28 (Location types) merged via PR #59.
+- **Branch:** `nightly/2026-06-14-issue-29`
+- **PR:** (opened this run)
+- **CI (local):** `fmt` ✅ `clippy --all-features -D warnings` ✅ `test
+  --all-features` ✅ (ocpi-server 74 tests, +13 new; workspace 192) — no
+  `Cargo.toml`/`Cargo.lock` changes → auto-mergeable. `cargo deny` not installed
+  in the runner; dep graph unchanged from main (which passes deny in CI).
+- **What shipped (all in `ocpi-server`):**
+  - `LocationsHandler` trait — full receiver interface: `list_locations`,
+    `get/put/patch_location`, `get/put/patch_evse`, `get/put/patch_connector`.
+  - `LocationsConfig` — `RwLock<HashMap<key, Location>>` keyed by
+    `{country_code}/{party_id}/{location_id}`. EVSEs/Connectors are stored
+    **nested inside their parent Location** (matching the OCPI object model);
+    sub-object writes locate the parent, then upsert/patch in place.
+  - `apply_merge_patch<T: Serialize + DeserializeOwned>` generic helper
+    (serialize → `json_merge` → deserialize) reused for location/evse/connector
+    PATCH. `upsert_by` helper for nested replace-or-append.
+  - `http::locations_router()` with composite-key routes
+    `/locations/{cc}/{pid}/{location_id}[/{evse_uid}][/{connector_id}]` (GET/PUT/
+    PATCH at each level) + paginated `GET /locations` (X-Total-Count, X-Limit,
+    Link: next), mirroring `sessions_router`.
+- **Spec/issue divergence (documented in PR + pickup comment):** the issue's
+  route sketch dropped `country_code`/`party_id` from the paths, but specified a
+  store key of `{cc}/{pid}/{location_id}`. The vendored spec
+  (`mod_locations.asciidoc` L232, §Receiver Interface) uses the full composite
+  path. Implemented the spec paths — also consistent with the existing
+  sessions/tariffs/tokens routers. The bare `/locations/{location_id}` sender
+  shape is a separate (CPO) interface, deferred.
+- **Method resolution trap (worked):** `LocationsConfig` has BOTH inherent
+  methods (`patch_location`, `put_evse`, …) and the `LocationsHandler` trait
+  impl with identical names. Inherent methods win in resolution, so the trait
+  impl bodies calling `self.patch_location(...)` dispatch to the inherent method
+  — no infinite recursion. Tests confirm at runtime.
+- **LOC note:** ~1054 insertions — above the ~500 soft target, but it's one
+  coherent complete module (the issue's full Location+EVSE+Connector acceptance
+  criteria). Bulk is `missing_docs` doc comments + mechanical handlers + 13
+  tests; no smaller slice leaves a functional receiver interface.
+- **Tests:** 13 unit tests on `LocationsConfig` (put/get roundtrip, missing →
+  None, list date filter + pagination, location/evse/connector patch + upsert,
+  unknown-parent → `NotFound`), following the existing direct-store test style
+  (no HTTP harness, no new dev-deps).
+- **Next:** #30 (M3 Locations client methods — GET list/single Location/EVSE/
+  Connector, P2) now unblocked; then #32 (M3 e2e Locations smoke test, depends
+  on #30). That completes M3.
+
 ## 2026-06-14 (run 12) — M2 credentials registration fetch-back (issue #33)
 
 - **Issue #33:** Complete the OCPI 2.2.1 registration handshake — on `POST`/`PUT
