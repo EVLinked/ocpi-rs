@@ -16,7 +16,7 @@ use ocpi_types::{
         CommandResponseType, CommandResult, CommandType, Credentials, LocationReferences,
         ReserveNow, Session, StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
     },
-    version::{Version, VersionDetails, VersionNumber},
+    version::{Endpoint, Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
 };
 
@@ -219,7 +219,93 @@ pub trait CredentialsHandler {
     async fn delete_credentials(&self, token: &str) -> Result<(), ServerError>;
 }
 
+// ── VersionFetcher ──────────────────────────────────────────────────────────
+
+/// An error raised while fetching a registering party's version catalogue
+/// during the credentials handshake (the "fetch-back" step).
+///
+/// Any variant maps to OCPI status code `3001`
+/// ([`OcpiStatusCode::UnableToUseClientApi`]) in the `POST`/`PUT /credentials`
+/// response — the server could not use the client's API.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    /// The HTTP request to the client's `/versions` or version-details
+    /// endpoint failed (connection error, non-2xx status, …).
+    #[error("transport error: {0}")]
+    Transport(String),
+
+    /// The client and server share no mutually-supported OCPI version.
+    #[error("no mutually-supported version")]
+    NoMutualVersion,
+
+    /// The response body could not be parsed as the expected OCPI object.
+    #[error("invalid response: {0}")]
+    Invalid(String),
+}
+
+/// The future type returned by [`VersionFetcher`] methods.
+///
+/// Boxed and `Send` so it can be awaited inside an axum handler (whose future
+/// must be `Send`). Using a boxed future — rather than `async fn` in the trait
+/// — keeps the trait object-safe (`dyn VersionFetcher`) and side-steps the
+/// `async_fn_in_trait` / axum `Send`-bound incompatibility.
+pub type FetchFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, FetchError>> + Send + 'a>>;
+
+/// Fetches a remote party's version catalogue during the registration
+/// handshake.
+///
+/// `ocpi-server` must not depend on an HTTP client (that would risk a cyclic
+/// dependency with `ocpi-client`), so the fetch-back is expressed as this
+/// contract. The host application supplies an implementation — typically one
+/// backed by `ocpi-client`'s `reqwest` transport — and passes it to
+/// [`CredentialsConfig::new_with_fetcher`].
+///
+/// Spec: `specs/ocpi/2.2.1/credentials.asciidoc` — §POST Method (the receiver
+/// fetches the sender's endpoints for the registered version).
+pub trait VersionFetcher: Send + Sync {
+    /// `GET {url}` — retrieve the remote party's `/versions` list, presenting
+    /// `token` as the OCPI `Authorization` credential.
+    ///
+    /// `url` is the `url` field of the [`Credentials`] object the party sent.
+    fn fetch_versions<'a>(&'a self, url: &'a str, token: &'a str) -> FetchFuture<'a, Vec<Version>>;
+
+    /// `GET {url}` — retrieve the endpoint catalogue for a single version.
+    ///
+    /// `url` is the [`Version::url`] selected from the `/versions` list.
+    fn fetch_version_details<'a>(
+        &'a self,
+        url: &'a str,
+        token: &'a str,
+    ) -> FetchFuture<'a, VersionDetails>;
+}
+
+/// Pick the entry with the highest [`VersionNumber`] that also appears in
+/// `supported`, or `None` if there is no overlap. Mirrors the sender-side
+/// negotiation in `ocpi-client`.
+fn select_best_version<'a>(
+    remote: &'a [Version],
+    supported: &[VersionNumber],
+) -> Option<&'a Version> {
+    remote
+        .iter()
+        .filter(|v| supported.contains(&v.version))
+        .max_by_key(|v| v.version)
+}
+
 // ── CredentialsConfig ─────────────────────────────────────────────────────────
+
+/// A registered remote party: their [`Credentials`] plus, when the
+/// registration fetch-back ran, the endpoint catalogue fetched from their
+/// `/versions` details.
+#[derive(Debug, Clone)]
+pub struct RegisteredParty {
+    /// The credentials object the party presented at registration.
+    pub credentials: Credentials,
+    /// Endpoints fetched from the party's selected version details, or `None`
+    /// when no [`VersionFetcher`] was configured (fetch-back skipped).
+    pub endpoints: Option<Vec<Endpoint>>,
+}
 
 /// An in-memory credentials store for use with [`http::credentials_router`].
 ///
@@ -235,7 +321,14 @@ pub trait CredentialsHandler {
 pub struct CredentialsConfig {
     /// The credentials this server returns on every successful request.
     pub own_credentials: Credentials,
-    registered: std::sync::RwLock<std::collections::HashMap<String, Credentials>>,
+    registered: std::sync::RwLock<std::collections::HashMap<String, RegisteredParty>>,
+    /// OCPI versions this server supports, used to negotiate the fetch-back
+    /// version against the registering party's `/versions` list.
+    supported_versions: Vec<VersionNumber>,
+    /// Optional transport for the registration fetch-back. When `None`, the
+    /// fetch-back step is skipped and parties register without an endpoint
+    /// catalogue.
+    fetcher: Option<std::sync::Arc<dyn VersionFetcher>>,
 }
 
 impl std::fmt::Debug for CredentialsConfig {
@@ -246,6 +339,8 @@ impl std::fmt::Debug for CredentialsConfig {
                 "registered_count",
                 &self.registered.read().map(|m| m.len()).unwrap_or(0),
             )
+            .field("supported_versions", &self.supported_versions)
+            .field("fetch_back", &self.fetcher.is_some())
             .finish()
     }
 }
@@ -253,14 +348,43 @@ impl std::fmt::Debug for CredentialsConfig {
 impl CredentialsConfig {
     /// Create a new registry with the given server credentials.
     ///
-    /// No parties are registered initially. Call
+    /// No parties are registered initially and no registration fetch-back is
+    /// performed (parties register without an endpoint catalogue). Call
     /// [`register`](Self::register) or let parties register via the axum
-    /// router.
+    /// router. Use [`new_with_fetcher`](Self::new_with_fetcher) to enable the
+    /// fetch-back step.
     #[must_use]
     pub fn new(own_credentials: Credentials) -> Self {
         Self {
             own_credentials,
             registered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            supported_versions: vec![VersionNumber::V2_2_1],
+            fetcher: None,
+        }
+    }
+
+    /// Create a registry that performs the OCPI registration fetch-back.
+    ///
+    /// On `POST`/`PUT /credentials`, the server calls `fetcher` to `GET` the
+    /// registering party's `/versions` list, selects the highest version that
+    /// is also in `supported_versions`, fetches that version's endpoint
+    /// catalogue, and stores it alongside the party's credentials. Any failure
+    /// surfaces as OCPI status code `3001`.
+    ///
+    /// `supported_versions` is the server's own list of supported OCPI
+    /// versions (it is the negotiation counterpart to the registering party's
+    /// advertised versions).
+    #[must_use]
+    pub fn new_with_fetcher(
+        own_credentials: Credentials,
+        supported_versions: Vec<VersionNumber>,
+        fetcher: std::sync::Arc<dyn VersionFetcher>,
+    ) -> Self {
+        Self {
+            own_credentials,
+            registered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            supported_versions,
+            fetcher: Some(fetcher),
         }
     }
 
@@ -273,33 +397,125 @@ impl CredentialsConfig {
             .contains_key(token)
     }
 
-    /// Register a new party under `token`, storing their [`Credentials`].
+    /// Register a new party under `token`, storing their [`Credentials`]
+    /// without an endpoint catalogue.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::AlreadyRegistered`] if `token` is already known.
     pub fn register(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        self.register_with_endpoints(token, credentials, None)
+    }
+
+    /// Register a new party under `token`, storing their [`Credentials`] and
+    /// the endpoint catalogue fetched during the registration handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::AlreadyRegistered`] if `token` is already known.
+    pub fn register_with_endpoints(
+        &self,
+        token: &str,
+        credentials: Credentials,
+        endpoints: Option<Vec<Endpoint>>,
+    ) -> Result<(), ServerError> {
         let mut map = self.registered.write().expect("lock not poisoned");
         if map.contains_key(token) {
             return Err(ServerError::AlreadyRegistered);
         }
-        map.insert(token.to_owned(), credentials);
+        map.insert(
+            token.to_owned(),
+            RegisteredParty {
+                credentials,
+                endpoints,
+            },
+        );
         Ok(())
     }
 
-    /// Update the stored credentials for an already-registered party.
+    /// Update the stored credentials for an already-registered party, clearing
+    /// any stored endpoint catalogue.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::NotRegistered`] if `token` is not in the
     /// registry.
     pub fn update(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        self.update_with_endpoints(token, credentials, None)
+    }
+
+    /// Update the stored credentials and endpoint catalogue for an
+    /// already-registered party.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotRegistered`] if `token` is not in the
+    /// registry.
+    pub fn update_with_endpoints(
+        &self,
+        token: &str,
+        credentials: Credentials,
+        endpoints: Option<Vec<Endpoint>>,
+    ) -> Result<(), ServerError> {
         let mut map = self.registered.write().expect("lock not poisoned");
         if !map.contains_key(token) {
             return Err(ServerError::NotRegistered);
         }
-        map.insert(token.to_owned(), credentials);
+        map.insert(
+            token.to_owned(),
+            RegisteredParty {
+                credentials,
+                endpoints,
+            },
+        );
         Ok(())
+    }
+
+    /// Return the endpoint catalogue stored for a registered party, if any.
+    ///
+    /// Returns `None` when the token is unknown or when the party registered
+    /// without a fetch-back (no [`VersionFetcher`] configured). The catalogue
+    /// is cloned out from behind the lock.
+    #[must_use]
+    pub fn get_endpoints(&self, token: &str) -> Option<Vec<Endpoint>> {
+        self.registered
+            .read()
+            .expect("lock not poisoned")
+            .get(token)
+            .and_then(|party| party.endpoints.clone())
+    }
+
+    /// Run the registration fetch-back for a registering party.
+    ///
+    /// Returns `Ok(None)` when no [`VersionFetcher`] is configured (the step is
+    /// skipped). Otherwise it `GET`s the party's `/versions` list, selects the
+    /// highest mutually-supported version, fetches that version's endpoint
+    /// catalogue, and returns it.
+    ///
+    /// The presented [`Credentials::token`] is used as the OCPI authorization
+    /// credential for the outbound calls; [`Credentials::url`] is the party's
+    /// `/versions` URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FetchError`] on any transport, negotiation, or parse failure.
+    /// Callers map this to OCPI status code `3001`.
+    pub async fn fetch_back(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<Option<Vec<Endpoint>>, FetchError> {
+        let Some(fetcher) = self.fetcher.as_ref() else {
+            return Ok(None);
+        };
+        let url = credentials.url.as_str();
+        let token = credentials.token.as_str();
+        let remote = fetcher.fetch_versions(url, token).await?;
+        let chosen = select_best_version(&remote, &self.supported_versions)
+            .ok_or(FetchError::NoMutualVersion)?;
+        let details = fetcher
+            .fetch_version_details(chosen.url.as_str(), token)
+            .await?;
+        Ok(Some(details.endpoints))
     }
 
     /// Remove the registration for `token`.
@@ -1721,6 +1937,16 @@ pub mod http {
         .into_response()
     }
 
+    /// `3001` — the server could not use the registering party's API during the
+    /// fetch-back (could not retrieve its `/versions` or version details).
+    fn credentials_unable_to_use_client() -> Response {
+        Json(OcpiResponse::<Credentials>::error(
+            OcpiStatusCode::UnableToUseClientApi,
+            "unable to use the client's API",
+        ))
+        .into_response()
+    }
+
     async fn credentials_get(
         State(cfg): State<Arc<CredentialsConfig>>,
         headers: HeaderMap,
@@ -1744,7 +1970,18 @@ pub mod http {
             Some(t) => t,
             None => return credentials_unauthorized(),
         };
-        match cfg.register(token.as_str(), body) {
+        // Reject re-registration before running the (potentially expensive)
+        // fetch-back.
+        if cfg.is_registered(token.as_str()) {
+            return credentials_method_not_allowed("already registered");
+        }
+        // Spec §POST: the receiver fetches the sender's endpoints for the
+        // registered version. Any failure → status code 3001.
+        let endpoints = match cfg.fetch_back(&body).await {
+            Ok(endpoints) => endpoints,
+            Err(_) => return credentials_unable_to_use_client(),
+        };
+        match cfg.register_with_endpoints(token.as_str(), body, endpoints) {
             Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
             Err(ServerError::AlreadyRegistered) => {
                 credentials_method_not_allowed("already registered")
@@ -1762,7 +1999,16 @@ pub mod http {
             Some(t) => t,
             None => return credentials_unauthorized(),
         };
-        match cfg.update(token.as_str(), body) {
+        // Reject updates from unknown parties before the fetch-back.
+        if !cfg.is_registered(token.as_str()) {
+            return credentials_method_not_allowed("not registered");
+        }
+        // Spec §PUT: re-fetch the sender's endpoints on credential update.
+        let endpoints = match cfg.fetch_back(&body).await {
+            Ok(endpoints) => endpoints,
+            Err(_) => return credentials_unable_to_use_client(),
+        };
+        match cfg.update_with_endpoints(token.as_str(), body, endpoints) {
             Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
             Err(ServerError::NotRegistered) => credentials_method_not_allowed("not registered"),
             Err(_) => credentials_server_error(),
@@ -3311,5 +3557,157 @@ mod tests {
         let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
         assert_eq!(cfg.own_credentials.token, "SERVER_TOKEN");
         assert_eq!(cfg.own_credentials.roles.len(), 1);
+    }
+
+    // ── Registration fetch-back (#33) ──────────────────────────────────────
+
+    use ocpi_types::version::{
+        Endpoint, InterfaceRole, ModuleID, Version, VersionDetails, VersionNumber,
+    };
+
+    fn ep_url(s: &str) -> ocpi_types::Url {
+        ocpi_types::Url::try_from(s).unwrap()
+    }
+
+    fn make_endpoints() -> Vec<Endpoint> {
+        vec![
+            Endpoint {
+                identifier: ModuleID::Credentials,
+                role: InterfaceRole::Sender,
+                url: ep_url("https://party.example/ocpi/2.2.1/credentials"),
+            },
+            Endpoint {
+                identifier: ModuleID::Locations,
+                role: InterfaceRole::Sender,
+                url: ep_url("https://party.example/ocpi/2.2.1/locations"),
+            },
+        ]
+    }
+
+    /// A canned [`VersionFetcher`] used to prove the boxed-future trait is
+    /// implementable. The async path itself is exercised by the M2 e2e smoke
+    /// test (#23), which brings in the async test harness.
+    struct TestFetcher {
+        details: VersionDetails,
+    }
+
+    impl VersionFetcher for TestFetcher {
+        fn fetch_versions<'a>(
+            &'a self,
+            _url: &'a str,
+            _token: &'a str,
+        ) -> FetchFuture<'a, Vec<Version>> {
+            let version = self.details.version;
+            let url = ep_url("https://party.example/ocpi/2.2.1");
+            Box::pin(async move { Ok(vec![Version { version, url }]) })
+        }
+
+        fn fetch_version_details<'a>(
+            &'a self,
+            _url: &'a str,
+            _token: &'a str,
+        ) -> FetchFuture<'a, VersionDetails> {
+            let details = self.details.clone();
+            Box::pin(async move { Ok(details) })
+        }
+    }
+
+    #[test]
+    fn select_best_version_picks_highest_mutual() {
+        let remote = vec![
+            Version {
+                version: VersionNumber::V2_1_1,
+                url: ep_url("https://r/2.1.1"),
+            },
+            Version {
+                version: VersionNumber::V2_2_1,
+                url: ep_url("https://r/2.2.1"),
+            },
+        ];
+        let supported = [VersionNumber::V2_1_1, VersionNumber::V2_2_1];
+        let chosen = select_best_version(&remote, &supported).unwrap();
+        assert_eq!(chosen.version, VersionNumber::V2_2_1);
+    }
+
+    #[test]
+    fn select_best_version_no_overlap_is_none() {
+        let remote = vec![Version {
+            version: VersionNumber::V2_0,
+            url: ep_url("https://r/2.0"),
+        }];
+        let supported = [VersionNumber::V2_2_1];
+        assert!(select_best_version(&remote, &supported).is_none());
+    }
+
+    #[test]
+    fn register_with_endpoints_stores_catalogue() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register_with_endpoints("TOKEN_A", make_credentials("P"), Some(make_endpoints()))
+            .unwrap();
+        let stored = cfg.get_endpoints("TOKEN_A").expect("endpoints stored");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].identifier, ModuleID::Credentials);
+    }
+
+    #[test]
+    fn register_without_fetchback_has_no_endpoints() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        assert!(cfg.get_endpoints("TOKEN_A").is_none());
+    }
+
+    #[test]
+    fn get_endpoints_unknown_token_is_none() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        assert!(cfg.get_endpoints("NOPE").is_none());
+    }
+
+    #[test]
+    fn update_with_endpoints_replaces_catalogue() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        assert!(cfg.get_endpoints("TOKEN_A").is_none());
+        cfg.update_with_endpoints("TOKEN_A", make_credentials("P2"), Some(make_endpoints()))
+            .unwrap();
+        assert_eq!(cfg.get_endpoints("TOKEN_A").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn new_with_fetcher_constructs_and_is_empty() {
+        let fetcher = std::sync::Arc::new(TestFetcher {
+            details: VersionDetails {
+                version: VersionNumber::V2_2_1,
+                endpoints: make_endpoints(),
+            },
+        });
+        let cfg = CredentialsConfig::new_with_fetcher(
+            make_credentials("SERVER_TOKEN"),
+            vec![VersionNumber::V2_2_1],
+            fetcher,
+        );
+        assert!(!cfg.is_registered("TOKEN_A"));
+        // Debug surfaces the fetch-back flag without leaking internals.
+        assert!(format!("{cfg:?}").contains("fetch_back: true"));
+    }
+
+    #[test]
+    fn fetch_back_future_is_send() {
+        // Compile-time guarantee: the fetch-back future is `Send`, so it can be
+        // awaited inside an axum handler (whose future must be `Send`).
+        fn assert_send<T: Send>(_: &T) {}
+        let fetcher = std::sync::Arc::new(TestFetcher {
+            details: VersionDetails {
+                version: VersionNumber::V2_2_1,
+                endpoints: make_endpoints(),
+            },
+        });
+        let cfg = CredentialsConfig::new_with_fetcher(
+            make_credentials("SERVER_TOKEN"),
+            vec![VersionNumber::V2_2_1],
+            fetcher,
+        );
+        let creds = make_credentials("P");
+        let fut = cfg.fetch_back(&creds);
+        assert_send(&fut);
     }
 }
