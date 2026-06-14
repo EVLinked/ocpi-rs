@@ -5,6 +5,47 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-14 (run 11, Sunday) — M2 credentials axum router, clean re-delivery (issue #22)
+
+- **Issue #22:** M2 credentials axum router — `CredentialsConfig` + `credentials_router()`.
+- **Branch:** `claude/dazzling-maxwell-za9j4s`
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (ocpi-server 53 tests, +8 new) `check --locked` ✅ (no dep/lock changes)
+- **Context — why a re-delivery:** #22 was first implemented in PR #24, but that PR
+  **bundled a `.github/workflows/ci.yml` MSRV change + a root `Cargo.toml` change + new
+  `ocpi-server` dev-deps** (`tower`/`tokio`/`serde_json` for `tower::oneshot` HTTP tests).
+  Those guarded-path edits forced `needs-human`, the owner didn't merge immediately, and the
+  PR went stale (`mergeable_state: unknown`/dirty) as M3–M6 squash-merged and grew `lib.rs`.
+  M2's credentials router has been the earliest-incomplete-milestone blocker for ~6 runs,
+  also blocking #33 (fetch-back) and #23 (e2e smoke test) which both need the router on `main`.
+- **What I did:** Re-delivered **only** the `CredentialsConfig` + `credentials_router()`
+  additions to `crates/ocpi-server/src/lib.rs` — **no `.github`/Cargo/lock changes** →
+  auto-merge eligible (no `needs-human`).
+  - `CredentialsConfig` (in-memory, `RwLock<HashMap<token, Credentials>>`): `new()`,
+    `is_registered()`, `register()` (→ `AlreadyRegistered`), `update()`/`delete()`
+    (→ `NotRegistered`). Custom `Debug` (registered_count, not contents).
+  - `credentials_router(Arc<CredentialsConfig>)` (axum): one `/credentials` route with
+    GET/POST/PUT/DELETE. Token auth via `CredentialToken::from_header_value`
+    (`Authorization: Token <base64>`). 401 on missing/unregistered token; **405** on
+    POST-already-registered / PUT-or-DELETE-not-registered (spec credentials.asciidoc §POST
+    L132 / §PUT L143 / §DELETE L150). Does NOT impl `CredentialsHandler` — same
+    `async_fn_in_trait` + axum `Send` avoidance as `VersionsConfig`.
+  - **Dropped PR #24's HTTP-level (`tower::oneshot`/`tokio::test`) tests** — they required the
+    dev-deps that forced the guarded-path edit. Kept 8 **sync** `CredentialsConfig` tests
+    instead, matching how every other merged router (sessions/cdrs/tariffs/tokens/commands)
+    is covered today. HTTP-level coverage is already planned via #23 (e2e smoke test), which
+    will introduce the test-harness deps in its own PR.
+- **Superseded PR #24:** commenting + closing it as superseded (clean re-delivery of #22 here).
+  The MSRV (#12) and CI-pinning (#13) guarded-path work stays in its own track — both
+  `continue-on-error`/non-blocking.
+- **Sunday groom:** M2 now has 3 owner-approved issues (#22 done here, #33 fetch-back, #23
+  smoke). M3 has #29/#30/#32. No milestone fell below 3 well-scoped `nightly` issues, so no
+  new issues created. Dependabot PRs #2–#5 (CI action bumps) are `.github`-only → owner's call.
+- **Next:** #33 (M2 credentials registration fetch-back) once this merges — completes the
+  M2 handshake. Or #29 (M3 Locations server handler + `locations_router()`), now unblocked on
+  `main`. Then re-deliver nothing else stuck — #24 is the last rotted nightly PR.
+
+---
+
 ## 2026-06-13 (run 10) — M3 Locations data types, clean re-delivery (issue #28)
 
 - **Issue #28:** M3: Locations data types — Location, EVSE, Connector, supporting enums.
