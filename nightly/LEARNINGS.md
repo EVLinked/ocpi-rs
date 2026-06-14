@@ -18,6 +18,16 @@ cycle. Keep entries short and specific. Prune contradictions.
   net-new content on a fresh branch off current `main` and close the old PR as superseded —
   NOT to resolve a 15+ region merge conflict. A blind `git cherry-pick` of the original
   commit will conflict heavily because later milestones grew the same files.
+- **HTTP-level router tests (`tower::oneshot`) are NOT worth a guarded-path PR.** PR #24
+  (credentials router, #22) added `tower`/`tokio`/`serde_json` as `ocpi-server` dev-deps purely
+  to exercise the axum router via `ServiceExt::oneshot` + `#[tokio::test]`. That `Cargo.toml`
+  edit forced `needs-human` and the PR rotted for ~6 runs, blocking all of M2. The established
+  codebase pattern is the opposite: **every merged router (sessions/cdrs/tariffs/tokens/commands)
+  has ZERO HTTP-level tests** — they test the `*Config` struct's sync helpers directly and let
+  the async handlers be compile-checked only. When re-delivering a stuck router PR, drop the
+  oneshot tests and keep sync `Config` tests so `Cargo.toml` stays untouched → auto-mergeable.
+  HTTP-level coverage belongs in the dedicated e2e smoke-test issue (#23/#32), which introduces
+  the harness dev-deps in its own PR.
 - **Before re-delivering old type work, grep `main` for the types first.** M4/M5/M6 added
   `TokenType`, `ConnectorType`, `ConnectorFormat`, `PowerType` to `v2_2_1.rs` ahead of the
   Locations module (Sessions/CDRs/Tokens referenced them). Re-applying an older Locations

@@ -219,6 +219,105 @@ pub trait CredentialsHandler {
     async fn delete_credentials(&self, token: &str) -> Result<(), ServerError>;
 }
 
+// ── CredentialsConfig ─────────────────────────────────────────────────────────
+
+/// An in-memory credentials store for use with [`http::credentials_router`].
+///
+/// Holds the server's own [`Credentials`] and a token-keyed registry of
+/// registered parties. Thread-safe via interior mutability (`RwLock`); wrap
+/// in `Arc` to share across axum handlers.
+///
+/// `CredentialsConfig` intentionally does **not** implement
+/// [`CredentialsHandler`] — wiring that trait generically through axum runs
+/// into `async_fn_in_trait` / `Send` bound issues. Use this concrete type with
+/// [`http::credentials_router`] instead, and keep the trait for custom
+/// out-of-process implementations.
+pub struct CredentialsConfig {
+    /// The credentials this server returns on every successful request.
+    pub own_credentials: Credentials,
+    registered: std::sync::RwLock<std::collections::HashMap<String, Credentials>>,
+}
+
+impl std::fmt::Debug for CredentialsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialsConfig")
+            .field("own_credentials", &self.own_credentials)
+            .field(
+                "registered_count",
+                &self.registered.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl CredentialsConfig {
+    /// Create a new registry with the given server credentials.
+    ///
+    /// No parties are registered initially. Call
+    /// [`register`](Self::register) or let parties register via the axum
+    /// router.
+    #[must_use]
+    pub fn new(own_credentials: Credentials) -> Self {
+        Self {
+            own_credentials,
+            registered: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Returns `true` if `token` belongs to a registered party.
+    #[must_use]
+    pub fn is_registered(&self, token: &str) -> bool {
+        self.registered
+            .read()
+            .expect("lock not poisoned")
+            .contains_key(token)
+    }
+
+    /// Register a new party under `token`, storing their [`Credentials`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::AlreadyRegistered`] if `token` is already known.
+    pub fn register(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if map.contains_key(token) {
+            return Err(ServerError::AlreadyRegistered);
+        }
+        map.insert(token.to_owned(), credentials);
+        Ok(())
+    }
+
+    /// Update the stored credentials for an already-registered party.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotRegistered`] if `token` is not in the
+    /// registry.
+    pub fn update(&self, token: &str, credentials: Credentials) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if !map.contains_key(token) {
+            return Err(ServerError::NotRegistered);
+        }
+        map.insert(token.to_owned(), credentials);
+        Ok(())
+    }
+
+    /// Remove the registration for `token`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotRegistered`] if `token` is not in the
+    /// registry.
+    pub fn delete(&self, token: &str) -> Result<(), ServerError> {
+        let mut map = self.registered.write().expect("lock not poisoned");
+        if !map.contains_key(token) {
+            return Err(ServerError::NotRegistered);
+        }
+        map.remove(token);
+        Ok(())
+    }
+}
+
 // ── SessionsHandler ───────────────────────────────────────────────────────────
 
 /// Handles the OCPI Sessions module endpoints.
@@ -1497,26 +1596,27 @@ pub mod http {
 
     use axum::{
         extract::{Path, Query, State},
-        http::StatusCode,
+        http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
         routing::{get, post},
         Json, Router,
     };
     use ocpi_types::{
         envelope::{OcpiPaged, OcpiResponse},
-        transport::PaginatedParams,
+        transport::{CredentialToken, PaginatedParams},
         v2_2_1::{
             AuthorizationInfo, CancelReservation, Cdr, ClientInfo, CommandResponse, CommandResult,
-            CommandType, LocationReferences, ReserveNow, Session, StartSession, StopSession,
-            Tariff, Token, TokenType, UnlockConnector,
+            CommandType, Credentials, LocationReferences, ReserveNow, Session, StartSession,
+            StopSession, Tariff, Token, TokenType, UnlockConnector,
         },
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
     };
 
     use crate::{
-        token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, HubClientInfoConfig,
-        ServerError, SessionsConfig, TariffsConfig, TokensConfig, VersionsConfig,
+        token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, CredentialsConfig,
+        HubClientInfoConfig, ServerError, SessionsConfig, TariffsConfig, TokensConfig,
+        VersionsConfig,
     };
 
     // ── Versions ──────────────────────────────────────────────────────────────
@@ -1557,6 +1657,130 @@ pub mod http {
                 format!("version {version_str} not supported"),
             ))
             .into_response(),
+        }
+    }
+
+    // ── Credentials ───────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI credentials endpoints.
+    ///
+    /// Exposes:
+    /// - `GET    /credentials` — return this server's own credentials
+    /// - `POST   /credentials` — register a new party; HTTP 405 if already registered
+    /// - `PUT    /credentials` — update an existing registration; HTTP 405 if not registered
+    /// - `DELETE /credentials` — revoke a registration; HTTP 405 if not registered
+    ///
+    /// All routes validate the `Authorization: Token <base64>` header.
+    /// Pass an `Arc<`[`CredentialsConfig`]`>` so the same store can be shared
+    /// with other handlers or inspected by the host application.
+    pub fn credentials_router(config: Arc<CredentialsConfig>) -> Router {
+        Router::new()
+            .route(
+                "/credentials",
+                get(credentials_get)
+                    .post(credentials_post)
+                    .put(credentials_put)
+                    .delete(credentials_delete),
+            )
+            .with_state(config)
+    }
+
+    /// Extract and decode the Bearer token from `Authorization: Token <base64>`.
+    fn extract_token(headers: &HeaderMap) -> Option<String> {
+        let value = headers.get("Authorization")?.to_str().ok()?;
+        CredentialToken::from_header_value(value).map(|t| t.as_str().to_owned())
+    }
+
+    fn credentials_unauthorized() -> Response {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(OcpiResponse::<Credentials>::error(
+                OcpiStatusCode::ClientError,
+                "unauthorized",
+            )),
+        )
+            .into_response()
+    }
+
+    fn credentials_method_not_allowed(msg: &'static str) -> Response {
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(OcpiResponse::<Credentials>::error(
+                OcpiStatusCode::ClientError,
+                msg,
+            )),
+        )
+            .into_response()
+    }
+
+    fn credentials_server_error() -> Response {
+        Json(OcpiResponse::<Credentials>::error(
+            OcpiStatusCode::ServerError,
+            "internal server error",
+        ))
+        .into_response()
+    }
+
+    async fn credentials_get(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return credentials_unauthorized(),
+        };
+        if !cfg.is_registered(token.as_str()) {
+            return credentials_unauthorized();
+        }
+        Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response()
+    }
+
+    async fn credentials_post(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+        Json(body): Json<Credentials>,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return credentials_unauthorized(),
+        };
+        match cfg.register(token.as_str(), body) {
+            Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
+            Err(ServerError::AlreadyRegistered) => {
+                credentials_method_not_allowed("already registered")
+            }
+            Err(_) => credentials_server_error(),
+        }
+    }
+
+    async fn credentials_put(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+        Json(body): Json<Credentials>,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return credentials_unauthorized(),
+        };
+        match cfg.update(token.as_str(), body) {
+            Ok(()) => Json(OcpiResponse::success(cfg.own_credentials.clone())).into_response(),
+            Err(ServerError::NotRegistered) => credentials_method_not_allowed("not registered"),
+            Err(_) => credentials_server_error(),
+        }
+    }
+
+    async fn credentials_delete(
+        State(cfg): State<Arc<CredentialsConfig>>,
+        headers: HeaderMap,
+    ) -> Response {
+        let token = match extract_token(&headers) {
+            Some(t) => t,
+            None => return credentials_unauthorized(),
+        };
+        match cfg.delete(token.as_str()) {
+            Ok(()) => Json(OcpiResponse::<Credentials>::success_empty()).into_response(),
+            Err(ServerError::NotRegistered) => credentials_method_not_allowed("not registered"),
+            Err(_) => credentials_server_error(),
         }
     }
 
@@ -3007,5 +3231,85 @@ mod tests {
         let (items, total) = cfg.list(cutoff, None, 0, 50);
         assert_eq!(total, 1);
         assert_eq!(items[0].party_id.as_str(), "MSP");
+    }
+
+    // ── CredentialsConfig ─────────────────────────────────────────────────────
+
+    fn make_credentials(token: &str) -> Credentials {
+        use ocpi_types::{common::BusinessDetails, v2_2_1::CredentialsRole, Url};
+        Credentials {
+            token: token.to_owned(),
+            url: Url::try_from("https://example.com/ocpi/versions").unwrap(),
+            roles: vec![CredentialsRole {
+                role: Role::Cpo,
+                business_details: BusinessDetails {
+                    name: "Test CPO".into(),
+                    website: None,
+                    logo: None,
+                },
+                party_id: CiString3::try_from("EXA").unwrap(),
+                country_code: CiString2::try_from("NL").unwrap(),
+            }],
+        }
+    }
+
+    #[test]
+    fn credentials_config_new_is_empty() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        assert!(!cfg.is_registered("TOKEN_A"));
+    }
+
+    #[test]
+    fn credentials_config_register_and_lookup() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("PARTY_TOKEN"))
+            .unwrap();
+        assert!(cfg.is_registered("TOKEN_A"));
+        assert!(!cfg.is_registered("TOKEN_B"));
+    }
+
+    #[test]
+    fn credentials_config_double_register_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        let err = cfg.register("TOKEN_A", make_credentials("P2")).unwrap_err();
+        assert!(matches!(err, ServerError::AlreadyRegistered));
+    }
+
+    #[test]
+    fn credentials_config_update_unknown_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        let err = cfg.update("UNKNOWN", make_credentials("P")).unwrap_err();
+        assert!(matches!(err, ServerError::NotRegistered));
+    }
+
+    #[test]
+    fn credentials_config_update_known_succeeds() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P1")).unwrap();
+        cfg.update("TOKEN_A", make_credentials("P2")).unwrap();
+        assert!(cfg.is_registered("TOKEN_A"));
+    }
+
+    #[test]
+    fn credentials_config_delete_unknown_is_error() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        let err = cfg.delete("UNKNOWN").unwrap_err();
+        assert!(matches!(err, ServerError::NotRegistered));
+    }
+
+    #[test]
+    fn credentials_config_delete_known_removes() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        cfg.register("TOKEN_A", make_credentials("P")).unwrap();
+        cfg.delete("TOKEN_A").unwrap();
+        assert!(!cfg.is_registered("TOKEN_A"));
+    }
+
+    #[test]
+    fn credentials_config_own_credentials_preserved() {
+        let cfg = CredentialsConfig::new(make_credentials("SERVER_TOKEN"));
+        assert_eq!(cfg.own_credentials.token, "SERVER_TOKEN");
+        assert_eq!(cfg.own_credentials.roles.len(), 1);
     }
 }
