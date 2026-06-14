@@ -13,8 +13,9 @@
 use ocpi_types::{
     v2_2_1::{
         AuthorizationInfo, CancelReservation, Cdr, ClientInfo, CommandResponse,
-        CommandResponseType, CommandResult, CommandType, Credentials, LocationReferences,
-        ReserveNow, Session, StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
+        CommandResponseType, CommandResult, CommandType, Connector, Credentials, Evse, Location,
+        LocationReferences, ReserveNow, Session, StartSession, StopSession, Tariff, Token,
+        TokenType, UnlockConnector,
     },
     version::{Endpoint, Version, VersionDetails, VersionNumber},
     DateTime, OcpiStatusCode, Utc,
@@ -1779,6 +1780,552 @@ impl HubClientInfoHandler for HubClientInfoConfig {
     }
 }
 
+// ── LocationsHandler ──────────────────────────────────────────────────────────
+
+/// Handles the OCPI Locations module **receiver** interface (the eMSP side that
+/// receives Location/EVSE/Connector data pushed by a CPO).
+///
+/// The receiver addresses objects by their composite key
+/// `{country_code}/{party_id}/{location_id}[/{evse_uid}][/{connector_id}]`, where
+/// `country_code` and `party_id` identify the CPO that owns the Location. EVSEs
+/// and Connectors are nested inside their parent Location, so the sub-object
+/// methods locate the parent first and mutate it in place.
+///
+/// The paginated [`list_locations`](Self::list_locations) method serves the CPO
+/// **sender** interface (`GET /locations`) for parity with the other module
+/// handlers.
+///
+/// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — §Receiver Interface.
+#[allow(async_fn_in_trait)]
+pub trait LocationsHandler {
+    /// Paginated list of locations whose `last_updated` is in
+    /// `[date_from, date_to)` — sender interface (`GET /locations`).
+    ///
+    /// Returns `(page_items, total_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the query cannot be executed.
+    async fn list_locations(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Location>, u32), ServerError>;
+
+    /// Fetch a single Location by its composite key (`GET`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location does not exist.
+    async fn get_location(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+    ) -> Result<Location, ServerError>;
+
+    /// Create or replace a Location (`PUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] on storage failure.
+    async fn put_location(&self, location: Location) -> Result<(), ServerError>;
+
+    /// Apply a JSON merge-patch (RFC 7396) to an existing Location (`PATCH`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location does not exist.
+    async fn patch_location(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError>;
+
+    /// Fetch a single EVSE nested in a Location (`GET`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location or EVSE is unknown.
+    async fn get_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+    ) -> Result<Evse, ServerError>;
+
+    /// Create or replace an EVSE nested in a Location (`PUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the parent Location is unknown.
+    async fn put_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse: Evse,
+    ) -> Result<(), ServerError>;
+
+    /// Apply a JSON merge-patch to a nested EVSE (`PATCH`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location or EVSE is unknown.
+    async fn patch_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError>;
+
+    /// Fetch a single Connector nested in an EVSE (`GET`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location, EVSE, or Connector is
+    /// unknown.
+    async fn get_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+    ) -> Result<Connector, ServerError>;
+
+    /// Create or replace a Connector nested in an EVSE (`PUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the parent Location or EVSE is
+    /// unknown.
+    async fn put_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector: Connector,
+    ) -> Result<(), ServerError>;
+
+    /// Apply a JSON merge-patch to a nested Connector (`PATCH`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the Location, EVSE, or Connector is
+    /// unknown.
+    async fn patch_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError>;
+}
+
+// ── LocationsConfig ───────────────────────────────────────────────────────────
+
+/// Thread-safe in-memory Locations store for use with [`http::locations_router`].
+///
+/// Locations are keyed by `"{country_code}/{party_id}/{location_id}"`. EVSEs and
+/// Connectors are stored nested inside their parent [`Location`] (matching the
+/// OCPI object model), so sub-object writes mutate the owning Location in place.
+/// Wrap in `Arc` to share across axum handlers or multiple threads.
+pub struct LocationsConfig {
+    locations: std::sync::RwLock<std::collections::HashMap<String, Location>>,
+}
+
+impl std::fmt::Debug for LocationsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocationsConfig")
+            .field(
+                "location_count",
+                &self.locations.read().map(|m| m.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+/// RFC 7396 merge-patch over a serde value: serialize `current`, apply `partial`,
+/// then deserialize back into `T`.
+fn apply_merge_patch<T>(
+    current: &T,
+    partial: ocpi_types::serde_json::Value,
+) -> Result<T, ServerError>
+where
+    T: ocpi_types::serde::Serialize + ocpi_types::serde::de::DeserializeOwned,
+{
+    let mut base = ocpi_types::serde_json::to_value(current)
+        .map_err(|_| ServerError::NotImplemented("patch serialize"))?;
+    json_merge(&mut base, partial);
+    ocpi_types::serde_json::from_value(base)
+        .map_err(|_| ServerError::NotImplemented("patch deserialize"))
+}
+
+impl LocationsConfig {
+    /// Create an empty Locations store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            locations: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn composite_key(country_code: &str, party_id: &str, location_id: &str) -> String {
+        format!("{country_code}/{party_id}/{location_id}")
+    }
+
+    /// Insert or replace a Location, keyed by its own `country_code`, `party_id`,
+    /// and `id`.
+    pub fn put(&self, location: Location) {
+        let key = Self::composite_key(
+            location.country_code.as_str(),
+            location.party_id.as_str(),
+            location.id.as_str(),
+        );
+        self.locations
+            .write()
+            .expect("lock not poisoned")
+            .insert(key, location);
+    }
+
+    /// Retrieve a Location by its composite key.
+    #[must_use]
+    pub fn get(&self, country_code: &str, party_id: &str, location_id: &str) -> Option<Location> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        self.locations
+            .read()
+            .expect("lock not poisoned")
+            .get(&key)
+            .cloned()
+    }
+
+    /// Retrieve a nested EVSE by its `uid`.
+    #[must_use]
+    pub fn get_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+    ) -> Option<Evse> {
+        self.get(country_code, party_id, location_id)?
+            .evses
+            .into_iter()
+            .find(|e| e.uid.as_str() == evse_uid)
+    }
+
+    /// Retrieve a nested Connector by its `id`.
+    #[must_use]
+    pub fn get_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+    ) -> Option<Connector> {
+        self.get_evse(country_code, party_id, location_id, evse_uid)?
+            .connectors
+            .into_iter()
+            .find(|c| c.id.as_str() == connector_id)
+    }
+
+    /// Apply a JSON merge-patch to an existing Location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if no Location matches the key.
+    pub fn patch_location(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        let mut map = self.locations.write().expect("lock not poisoned");
+        let current = map.get(&key).ok_or(ServerError::NotFound)?;
+        let updated = apply_merge_patch(current, partial)?;
+        map.insert(key, updated);
+        Ok(())
+    }
+
+    /// Insert or replace a nested EVSE inside an existing Location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if the parent Location is unknown.
+    pub fn put_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse: Evse,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        let mut map = self.locations.write().expect("lock not poisoned");
+        let location = map.get_mut(&key).ok_or(ServerError::NotFound)?;
+        upsert_by(&mut location.evses, evse, |e| e.uid.as_str().to_owned());
+        Ok(())
+    }
+
+    /// Apply a JSON merge-patch to a nested EVSE.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if the Location or EVSE is unknown.
+    pub fn patch_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        let mut map = self.locations.write().expect("lock not poisoned");
+        let location = map.get_mut(&key).ok_or(ServerError::NotFound)?;
+        let evse = location
+            .evses
+            .iter_mut()
+            .find(|e| e.uid.as_str() == evse_uid)
+            .ok_or(ServerError::NotFound)?;
+        *evse = apply_merge_patch(evse, partial)?;
+        Ok(())
+    }
+
+    /// Insert or replace a nested Connector inside an existing EVSE.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if the Location or EVSE is unknown.
+    pub fn put_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector: Connector,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        let mut map = self.locations.write().expect("lock not poisoned");
+        let location = map.get_mut(&key).ok_or(ServerError::NotFound)?;
+        let evse = location
+            .evses
+            .iter_mut()
+            .find(|e| e.uid.as_str() == evse_uid)
+            .ok_or(ServerError::NotFound)?;
+        upsert_by(&mut evse.connectors, connector, |c| {
+            c.id.as_str().to_owned()
+        });
+        Ok(())
+    }
+
+    /// Apply a JSON merge-patch to a nested Connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] if the Location, EVSE, or Connector is
+    /// unknown.
+    pub fn patch_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        let key = Self::composite_key(country_code, party_id, location_id);
+        let mut map = self.locations.write().expect("lock not poisoned");
+        let location = map.get_mut(&key).ok_or(ServerError::NotFound)?;
+        let evse = location
+            .evses
+            .iter_mut()
+            .find(|e| e.uid.as_str() == evse_uid)
+            .ok_or(ServerError::NotFound)?;
+        let connector = evse
+            .connectors
+            .iter_mut()
+            .find(|c| c.id.as_str() == connector_id)
+            .ok_or(ServerError::NotFound)?;
+        *connector = apply_merge_patch(connector, partial)?;
+        Ok(())
+    }
+
+    /// Return a filtered and paginated slice of Locations.
+    ///
+    /// Filters by `last_updated >= date_from` and (if provided)
+    /// `last_updated < date_to`. Results are sorted by `last_updated`.
+    ///
+    /// Returns `(page_items, total_matching_count)`.
+    #[must_use]
+    pub fn list(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<Location>, u32) {
+        let map = self.locations.read().expect("lock not poisoned");
+        let mut filtered: Vec<&Location> = map
+            .values()
+            .filter(|l| l.last_updated >= date_from && date_to.is_none_or(|dt| l.last_updated < dt))
+            .collect();
+        filtered.sort_by_key(|l| l.last_updated);
+        let total = filtered.len() as u32;
+        let page: Vec<Location> = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        (page, total)
+    }
+}
+
+/// Replace the element of `items` whose key matches `incoming`'s, or append it.
+fn upsert_by<T, F>(items: &mut Vec<T>, incoming: T, key: F)
+where
+    F: Fn(&T) -> String,
+{
+    let incoming_key = key(&incoming);
+    if let Some(slot) = items.iter_mut().find(|item| key(item) == incoming_key) {
+        *slot = incoming;
+    } else {
+        items.push(incoming);
+    }
+}
+
+impl Default for LocationsConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl LocationsHandler for LocationsConfig {
+    async fn list_locations(
+        &self,
+        date_from: DateTime<Utc>,
+        date_to: Option<DateTime<Utc>>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Location>, u32), ServerError> {
+        Ok(self.list(date_from, date_to, offset, limit))
+    }
+
+    async fn get_location(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+    ) -> Result<Location, ServerError> {
+        self.get(country_code, party_id, location_id)
+            .ok_or(ServerError::NotFound)
+    }
+
+    async fn put_location(&self, location: Location) -> Result<(), ServerError> {
+        self.put(location);
+        Ok(())
+    }
+
+    async fn patch_location(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        self.patch_location(country_code, party_id, location_id, partial)
+    }
+
+    async fn get_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+    ) -> Result<Evse, ServerError> {
+        self.get_evse(country_code, party_id, location_id, evse_uid)
+            .ok_or(ServerError::NotFound)
+    }
+
+    async fn put_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse: Evse,
+    ) -> Result<(), ServerError> {
+        self.put_evse(country_code, party_id, location_id, evse)
+    }
+
+    async fn patch_evse(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        self.patch_evse(country_code, party_id, location_id, evse_uid, partial)
+    }
+
+    async fn get_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+    ) -> Result<Connector, ServerError> {
+        self.get_connector(country_code, party_id, location_id, evse_uid, connector_id)
+            .ok_or(ServerError::NotFound)
+    }
+
+    async fn put_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector: Connector,
+    ) -> Result<(), ServerError> {
+        self.put_connector(country_code, party_id, location_id, evse_uid, connector)
+    }
+
+    async fn patch_connector(
+        &self,
+        country_code: &str,
+        party_id: &str,
+        location_id: &str,
+        evse_uid: &str,
+        connector_id: &str,
+        partial: ocpi_types::serde_json::Value,
+    ) -> Result<(), ServerError> {
+        self.patch_connector(
+            country_code,
+            party_id,
+            location_id,
+            evse_uid,
+            connector_id,
+            partial,
+        )
+    }
+}
+
 /// RFC 7396 JSON merge-patch: recursively apply `patch` onto `base`.
 fn json_merge(base: &mut ocpi_types::serde_json::Value, patch: ocpi_types::serde_json::Value) {
     match patch {
@@ -1822,8 +2369,8 @@ pub mod http {
         transport::{CredentialToken, PaginatedParams},
         v2_2_1::{
             AuthorizationInfo, CancelReservation, Cdr, ClientInfo, CommandResponse, CommandResult,
-            CommandType, Credentials, LocationReferences, ReserveNow, Session, StartSession,
-            StopSession, Tariff, Token, TokenType, UnlockConnector,
+            CommandType, Connector, Credentials, Evse, Location, LocationReferences, ReserveNow,
+            Session, StartSession, StopSession, Tariff, Token, TokenType, UnlockConnector,
         },
         version::{VersionDetails, VersionNumber},
         OcpiStatusCode,
@@ -1831,8 +2378,8 @@ pub mod http {
 
     use crate::{
         token_type_str, CdrsConfig, CommandsConfig, CommandsHandler, CredentialsConfig,
-        HubClientInfoConfig, ServerError, SessionsConfig, TariffsConfig, TokensConfig,
-        VersionsConfig,
+        HubClientInfoConfig, LocationsConfig, ServerError, SessionsConfig, TariffsConfig,
+        TokensConfig, VersionsConfig,
     };
 
     // ── Versions ──────────────────────────────────────────────────────────────
@@ -2727,6 +3274,249 @@ pub mod http {
         cfg.put(&country_code, &party_id, info);
         Json(OcpiResponse::<ClientInfo>::success_empty()).into_response()
     }
+
+    // ── Locations ─────────────────────────────────────────────────────────────
+
+    /// Build an axum router for the OCPI Locations module (receiver interface).
+    ///
+    /// Exposes:
+    /// - `GET   /locations` — paginated list (sender interface, CPO)
+    /// - `GET/PUT/PATCH /locations/{country_code}/{party_id}/{location_id}`
+    /// - `GET/PUT/PATCH /locations/{country_code}/{party_id}/{location_id}/{evse_uid}`
+    /// - `GET/PUT/PATCH /locations/{country_code}/{party_id}/{location_id}/{evse_uid}/{connector_id}`
+    ///
+    /// EVSEs and Connectors are nested inside their parent Location; the
+    /// sub-object routes locate the parent first. `PUT`/`PATCH` to a sub-object
+    /// of an unknown Location (or EVSE) return `404`. OCPI routing headers
+    /// (`OCPI-from/to-party-id/country-code`) are accepted on all routes; they
+    /// are not enforced at this layer and can be validated by middleware.
+    ///
+    /// Spec: `specs/ocpi/2.2.1/mod_locations.asciidoc` — §Receiver Interface.
+    pub fn locations_router(config: Arc<LocationsConfig>) -> Router {
+        Router::new()
+            .route("/locations", get(locations_list))
+            .route(
+                "/locations/{country_code}/{party_id}/{location_id}",
+                get(location_get).put(location_put).patch(location_patch),
+            )
+            .route(
+                "/locations/{country_code}/{party_id}/{location_id}/{evse_uid}",
+                get(evse_get).put(evse_put).patch(evse_patch),
+            )
+            .route(
+                "/locations/{country_code}/{party_id}/{location_id}/{evse_uid}/{connector_id}",
+                get(connector_get).put(connector_put).patch(connector_patch),
+            )
+            .with_state(config)
+    }
+
+    /// `404 Not Found` with OCPI status `2003` (Unknown Location).
+    fn location_not_found<T: ocpi_types::serde::Serialize>(msg: String) -> Response {
+        (
+            StatusCode::NOT_FOUND,
+            Json(OcpiResponse::<T>::error(
+                OcpiStatusCode::UnknownLocation,
+                msg,
+            )),
+        )
+            .into_response()
+    }
+
+    /// Map a [`ServerError`] from a `PUT`/`PATCH` into a `204`-style empty success
+    /// or a `404`, for the response type `T`.
+    fn write_result<T: ocpi_types::serde::Serialize>(
+        result: Result<(), ServerError>,
+        missing: &str,
+    ) -> Response {
+        match result {
+            Ok(()) => Json(OcpiResponse::<T>::success_empty()).into_response(),
+            Err(ServerError::NotFound) => location_not_found::<T>(format!("unknown {missing}")),
+            Err(e) => {
+                Json(OcpiResponse::<T>::error(e.status_code(), e.to_string())).into_response()
+            }
+        }
+    }
+
+    async fn locations_list(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Query(params): Query<PaginatedParams>,
+    ) -> Response {
+        use ocpi_types::chrono::TimeZone as _;
+        let date_from = params.date_from.unwrap_or_else(|| {
+            ocpi_types::Utc
+                .with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
+                .single()
+                .expect("epoch is valid")
+        });
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+
+        let (items, total) = cfg.list(date_from, params.date_to, offset, limit);
+        let page = OcpiPaged::new(items, offset, limit, total);
+        let next_offset = page.next_offset();
+        let body = page.into_response();
+
+        let mut response = Json(body).into_response();
+        let hdrs = response.headers_mut();
+        if let Ok(v) = total.to_string().parse() {
+            hdrs.insert("x-total-count", v);
+        }
+        if let Ok(v) = limit.to_string().parse() {
+            hdrs.insert("x-limit", v);
+        }
+        if let Some(next_off) = next_offset {
+            let link = format!("</locations?offset={next_off}&limit={limit}>; rel=\"next\"");
+            if let Ok(v) = link.parse() {
+                hdrs.insert("link", v);
+            }
+        }
+
+        response
+    }
+
+    async fn location_get(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id)): Path<(String, String, String)>,
+    ) -> Response {
+        match cfg.get(&country_code, &party_id, &location_id) {
+            Some(location) => Json(OcpiResponse::success(location)).into_response(),
+            None => location_not_found::<Location>(format!(
+                "no Location {country_code}/{party_id}/{location_id}"
+            )),
+        }
+    }
+
+    async fn location_put(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((_country_code, _party_id, _location_id)): Path<(String, String, String)>,
+        Json(location): Json<Location>,
+    ) -> Response {
+        cfg.put(location);
+        Json(OcpiResponse::<Location>::success_empty()).into_response()
+    }
+
+    async fn location_patch(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id)): Path<(String, String, String)>,
+        Json(partial): Json<ocpi_types::serde_json::Value>,
+    ) -> Response {
+        write_result::<Location>(
+            cfg.patch_location(&country_code, &party_id, &location_id, partial),
+            "Location",
+        )
+    }
+
+    async fn evse_get(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, evse_uid)): Path<(
+            String,
+            String,
+            String,
+            String,
+        )>,
+    ) -> Response {
+        match cfg.get_evse(&country_code, &party_id, &location_id, &evse_uid) {
+            Some(evse) => Json(OcpiResponse::success(evse)).into_response(),
+            None => location_not_found::<Evse>(format!("no EVSE {evse_uid} in {location_id}")),
+        }
+    }
+
+    async fn evse_put(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, _evse_uid)): Path<(
+            String,
+            String,
+            String,
+            String,
+        )>,
+        Json(evse): Json<Evse>,
+    ) -> Response {
+        write_result::<Evse>(
+            cfg.put_evse(&country_code, &party_id, &location_id, evse),
+            "Location",
+        )
+    }
+
+    async fn evse_patch(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, evse_uid)): Path<(
+            String,
+            String,
+            String,
+            String,
+        )>,
+        Json(partial): Json<ocpi_types::serde_json::Value>,
+    ) -> Response {
+        write_result::<Evse>(
+            cfg.patch_evse(&country_code, &party_id, &location_id, &evse_uid, partial),
+            "Location or EVSE",
+        )
+    }
+
+    async fn connector_get(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, evse_uid, connector_id)): Path<(
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+    ) -> Response {
+        match cfg.get_connector(
+            &country_code,
+            &party_id,
+            &location_id,
+            &evse_uid,
+            &connector_id,
+        ) {
+            Some(connector) => Json(OcpiResponse::success(connector)).into_response(),
+            None => location_not_found::<Connector>(format!(
+                "no Connector {connector_id} in {evse_uid}"
+            )),
+        }
+    }
+
+    async fn connector_put(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, evse_uid, _connector_id)): Path<(
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+        Json(connector): Json<Connector>,
+    ) -> Response {
+        write_result::<Connector>(
+            cfg.put_connector(&country_code, &party_id, &location_id, &evse_uid, connector),
+            "Location or EVSE",
+        )
+    }
+
+    async fn connector_patch(
+        State(cfg): State<Arc<LocationsConfig>>,
+        Path((country_code, party_id, location_id, evse_uid, connector_id)): Path<(
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+        Json(partial): Json<ocpi_types::serde_json::Value>,
+    ) -> Response {
+        write_result::<Connector>(
+            cfg.patch_connector(
+                &country_code,
+                &party_id,
+                &location_id,
+                &evse_uid,
+                &connector_id,
+                partial,
+            ),
+            "Location, EVSE, or Connector",
+        )
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -2736,12 +3526,12 @@ mod tests {
     use super::*;
     use ocpi_types::chrono::TimeZone as _;
     use ocpi_types::{
-        common::{CiString2, CiString3, Role},
+        common::{CiString2, CiString3, CiString36, GeoLocation, Role},
         v2_2_1::{
             AllowedType, AuthMethod, Cdr, CdrDimension, CdrDimensionType, CdrLocation, CdrToken,
-            ChargingPeriod, ClientInfo, ConnectionStatus, ConnectorFormat, ConnectorType,
-            PowerType, PriceComponent, Session, SessionStatus, Tariff, TariffDimensionType,
-            TariffElement, Token, TokenType, WhitelistType,
+            ChargingPeriod, ClientInfo, ConnectionStatus, Connector, ConnectorFormat,
+            ConnectorType, Evse, Location, PowerType, PriceComponent, Session, SessionStatus,
+            Status, Tariff, TariffDimensionType, TariffElement, Token, TokenType, WhitelistType,
         },
         OcpiStatusCode,
     };
@@ -3709,5 +4499,259 @@ mod tests {
         let creds = make_credentials("P");
         let fut = cfg.fetch_back(&creds);
         assert_send(&fut);
+    }
+
+    // ── Locations ───────────────────────────────────────────────────────────
+
+    fn make_connector(id: &str, ts: DateTime<Utc>) -> Connector {
+        Connector {
+            id: CiString36::try_from(id).unwrap(),
+            standard: ConnectorType::Iec62196T2,
+            format: ConnectorFormat::Socket,
+            power_type: PowerType::Ac3Phase,
+            max_voltage: 400,
+            max_amperage: 16,
+            max_electric_power: None,
+            tariff_ids: Vec::new(),
+            terms_and_conditions: None,
+            last_updated: ts,
+        }
+    }
+
+    fn make_evse(uid: &str, status: Status, ts: DateTime<Utc>) -> Evse {
+        Evse {
+            uid: CiString36::try_from(uid).unwrap(),
+            evse_id: None,
+            status,
+            status_schedule: Vec::new(),
+            capabilities: Vec::new(),
+            connectors: vec![make_connector("1", ts)],
+            floor_level: None,
+            coordinates: None,
+            physical_reference: None,
+            directions: Vec::new(),
+            parking_restrictions: Vec::new(),
+            images: Vec::new(),
+            last_updated: ts,
+        }
+    }
+
+    fn make_location(id: &str, ts: DateTime<Utc>) -> Location {
+        Location {
+            country_code: CiString2::try_from("NL").unwrap(),
+            party_id: CiString3::try_from("CPO").unwrap(),
+            id: CiString36::try_from(id).unwrap(),
+            publish: true,
+            publish_allowed_to: Vec::new(),
+            name: None,
+            address: "F.Rooseveltlaan 3A".into(),
+            city: "Gent".into(),
+            postal_code: Some("9000".into()),
+            state: None,
+            country: "BEL".into(),
+            coordinates: GeoLocation {
+                latitude: "51.047599".into(),
+                longitude: "3.729944".into(),
+            },
+            related_locations: Vec::new(),
+            parking_type: None,
+            evses: vec![make_evse("EVSE1", Status::Available, ts)],
+            directions: Vec::new(),
+            operator: None,
+            suboperator: None,
+            owner: None,
+            facilities: Vec::new(),
+            time_zone: "Europe/Amsterdam".into(),
+            opening_times: None,
+            charging_when_closed: None,
+            images: Vec::new(),
+            energy_mix: None,
+            last_updated: ts,
+        }
+    }
+
+    #[test]
+    fn locations_config_put_and_get_roundtrip() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let got = cfg.get("NL", "CPO", "LOC1").unwrap();
+        assert_eq!(got.id.as_str(), "LOC1");
+        assert_eq!(got.evses.len(), 1);
+    }
+
+    #[test]
+    fn locations_config_get_missing_returns_none() {
+        let cfg = LocationsConfig::new();
+        assert!(cfg.get("NL", "CPO", "MISSING").is_none());
+    }
+
+    #[test]
+    fn locations_config_list_filters_by_date_from() {
+        let cfg = LocationsConfig::new();
+        let old = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let new = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", old));
+        cfg.put(make_location("LOC2", new));
+        let cutoff = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+        let (items, total) = cfg.list(cutoff, None, 0, 50);
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id.as_str(), "LOC2");
+    }
+
+    #[test]
+    fn locations_config_list_pagination() {
+        let cfg = LocationsConfig::new();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        for i in 0..5 {
+            let ts = base + ocpi_types::chrono::Duration::seconds(i);
+            cfg.put(make_location(&format!("LOC{i}"), ts));
+        }
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        let (page, total) = cfg.list(epoch, None, 2, 2);
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id.as_str(), "LOC2");
+        assert_eq!(page[1].id.as_str(), "LOC3");
+    }
+
+    #[test]
+    fn locations_config_patch_updates_field() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let patch = ocpi_types::serde_json::json!({ "city": "Amsterdam" });
+        cfg.patch_location("NL", "CPO", "LOC1", patch).unwrap();
+        let updated = cfg.get("NL", "CPO", "LOC1").unwrap();
+        assert_eq!(updated.city, "Amsterdam");
+        // Sibling data (the nested EVSE) survives the merge-patch.
+        assert_eq!(updated.evses.len(), 1);
+    }
+
+    #[test]
+    fn locations_config_patch_missing_returns_not_found() {
+        let cfg = LocationsConfig::new();
+        let patch = ocpi_types::serde_json::json!({ "city": "Amsterdam" });
+        let err = cfg
+            .patch_location("NL", "CPO", "MISSING", patch)
+            .unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn locations_config_get_evse_and_connector() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let evse = cfg.get_evse("NL", "CPO", "LOC1", "EVSE1").unwrap();
+        assert_eq!(evse.uid.as_str(), "EVSE1");
+        let connector = cfg
+            .get_connector("NL", "CPO", "LOC1", "EVSE1", "1")
+            .unwrap();
+        assert_eq!(connector.id.as_str(), "1");
+        assert!(cfg.get_evse("NL", "CPO", "LOC1", "NOPE").is_none());
+        assert!(cfg
+            .get_connector("NL", "CPO", "LOC1", "EVSE1", "NOPE")
+            .is_none());
+    }
+
+    #[test]
+    fn locations_config_put_evse_upserts_within_location() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        // New EVSE is appended.
+        cfg.put_evse(
+            "NL",
+            "CPO",
+            "LOC1",
+            make_evse("EVSE2", Status::Charging, ts),
+        )
+        .unwrap();
+        let loc = cfg.get("NL", "CPO", "LOC1").unwrap();
+        assert_eq!(loc.evses.len(), 2);
+        // Re-PUT the same uid replaces it rather than duplicating.
+        cfg.put_evse(
+            "NL",
+            "CPO",
+            "LOC1",
+            make_evse("EVSE1", Status::Inoperative, ts),
+        )
+        .unwrap();
+        let loc = cfg.get("NL", "CPO", "LOC1").unwrap();
+        assert_eq!(loc.evses.len(), 2);
+        let evse1 = cfg.get_evse("NL", "CPO", "LOC1", "EVSE1").unwrap();
+        assert_eq!(evse1.status, Status::Inoperative);
+    }
+
+    #[test]
+    fn locations_config_put_evse_unknown_location_returns_not_found() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let err = cfg
+            .put_evse(
+                "NL",
+                "CPO",
+                "MISSING",
+                make_evse("EVSE1", Status::Available, ts),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn locations_config_patch_evse_updates_status() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let patch = ocpi_types::serde_json::json!({ "status": "CHARGING" });
+        cfg.patch_evse("NL", "CPO", "LOC1", "EVSE1", patch).unwrap();
+        let evse = cfg.get_evse("NL", "CPO", "LOC1", "EVSE1").unwrap();
+        assert_eq!(evse.status, Status::Charging);
+        // The nested connector is untouched by the EVSE merge-patch.
+        assert_eq!(evse.connectors.len(), 1);
+    }
+
+    #[test]
+    fn locations_config_patch_evse_unknown_returns_not_found() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let patch = ocpi_types::serde_json::json!({ "status": "CHARGING" });
+        let err = cfg
+            .patch_evse("NL", "CPO", "LOC1", "NOPE", patch)
+            .unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn locations_config_put_and_patch_connector() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        // Append a second connector to the EVSE.
+        cfg.put_connector("NL", "CPO", "LOC1", "EVSE1", make_connector("2", ts))
+            .unwrap();
+        let evse = cfg.get_evse("NL", "CPO", "LOC1", "EVSE1").unwrap();
+        assert_eq!(evse.connectors.len(), 2);
+        // Merge-patch the connector's amperage.
+        let patch = ocpi_types::serde_json::json!({ "max_amperage": 32 });
+        cfg.patch_connector("NL", "CPO", "LOC1", "EVSE1", "1", patch)
+            .unwrap();
+        let connector = cfg
+            .get_connector("NL", "CPO", "LOC1", "EVSE1", "1")
+            .unwrap();
+        assert_eq!(connector.max_amperage, 32);
+    }
+
+    #[test]
+    fn locations_config_put_connector_unknown_evse_returns_not_found() {
+        let cfg = LocationsConfig::new();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        cfg.put(make_location("LOC1", ts));
+        let err = cfg
+            .put_connector("NL", "CPO", "LOC1", "NOPE", make_connector("1", ts))
+            .unwrap_err();
+        assert!(matches!(err, ServerError::NotFound));
     }
 }

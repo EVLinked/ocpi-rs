@@ -65,6 +65,20 @@ cycle. Keep entries short and specific. Prune contradictions.
   generics); the pattern is `Serialize → serialize_str` and `Deserialize → String::deserialize +
   TryFrom`.
 
+- **Inherent methods shadow same-named trait methods — use this to avoid PATCH
+  recursion.** `LocationsConfig` has both inherent `patch_location()` etc. AND a
+  `LocationsHandler` trait impl with identical signatures. In the trait body,
+  `self.patch_location(...)` resolves to the **inherent** method (inherent wins
+  over trait in method lookup), so the trait impl can delegate to the store
+  without recursing into itself. Verify with a runtime test, not just compile.
+- **Reusable RFC 7396 merge-patch helper:** `fn apply_merge_patch<T>(cur: &T, p:
+  Value) -> Result<T>` where `T: ocpi_types::serde::Serialize +
+  ocpi_types::serde::de::DeserializeOwned` (both re-exported from `ocpi-types`,
+  so `ocpi-server` needs no direct `serde` dep). Serialize → `json_merge` →
+  `from_value`. One helper covers Location/EVSE/Connector PATCH at every nesting
+  level. Generic axum response helpers that `Json(OcpiResponse::<T>::...)` need a
+  `T: serde::Serialize` bound or `into_response()` won't compile.
+
 ## Serde patterns
 
 - **Serialize an enum as its integer value** (not variant name): use `#[serde(from = "u16", into = "u16")]` on the enum + `impl From<u16>` (infallible) + `impl From<MyEnum> for u16`. No manual `Serialize`/`Deserialize` impl needed. Works for any `Copy`/`Clone` enum.
