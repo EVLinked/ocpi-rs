@@ -5,6 +5,55 @@ result, what worked, what to try next.
 
 ---
 
+## 2026-06-14 (run 12) — M2 credentials registration fetch-back (issue #33)
+
+- **Issue #33:** Complete the OCPI 2.2.1 registration handshake — on `POST`/`PUT
+  /credentials` the receiver must fetch the registering party's `/versions` and
+  store its endpoint catalogue. P1, M2, owner-approved `nightly`.
+- **Branch:** `nightly/2026-06-14-issue-33`
+- **PR:** (opened this run)
+- **CI (local):** `fmt` ✅ `clippy -D warnings` ✅ `test` ✅ (ocpi-server 61 tests,
+  +9 new; workspace 192) `check --locked` ✅ (no `Cargo.toml`/`Cargo.lock`
+  changes → auto-mergeable).
+- **What shipped (all in `ocpi-server`):**
+  - `FetchError` enum (Transport / NoMutualVersion / Invalid → status `3001`).
+  - `VersionFetcher` trait + `FetchFuture<'a, T>` alias. Uses **std boxed
+    futures** (`Pin<Box<dyn Future + Send>>`), NOT `async fn` in trait — this
+    keeps the trait object-safe (`dyn VersionFetcher`) AND `Send`, so it can be
+    awaited inside an axum handler. Sidesteps the documented `async_fn_in_trait`
+    + axum `Send`-bound wall.
+  - `RegisteredParty { credentials, endpoints }`; store value type changed from
+    `Credentials` to `RegisteredParty` (internal — register/update signatures
+    unchanged, existing tests untouched).
+  - `CredentialsConfig`: `new_with_fetcher(own, supported_versions, fetcher)`,
+    `register_with_endpoints`, `update_with_endpoints`, `get_endpoints`, and
+    async `fetch_back` (GET /versions → `select_best_version` → GET details).
+  - POST/PUT handlers run the fetch-back; any failure → `3001`
+    (`UnableToUseClientApi`). POST checks `is_registered` before the fetch to
+    avoid wasted work on re-registration.
+  - 9 sync unit tests + a `fetch_back_future_is_send` compile-time `Send` proof.
+- **Key decisions / deviations from the issue text (justified in PR):**
+  - **Boxed-future trait** instead of `async fn` in trait (axum `Send` rule).
+  - **Default `OcpiVersionFetcher` (reqwest) deferred** to a follow-up issue:
+    putting it in `ocpi-client` forces `ocpi-client → ocpi-server` dep → a
+    `Cargo.lock` line change → `needs-human`. Keeping this PR server-only keeps
+    it auto-mergeable. Filed follow-up.
+  - **`new_with_fetcher` gained a `supported_versions` param** — real
+    negotiation needs the server's own version list; `CredentialsConfig` did not
+    previously carry one.
+  - **Async fetch-back not unit-run**: `#![forbid(unsafe_code)]` + no tokio
+    dev-dep ⇒ no in-crate `block_on`. Tested the sync building blocks
+    (`select_best_version`, endpoint storage/accessor) + a compile-time `Send`
+    proof; end-to-end async path belongs to the M2 e2e smoke test (#23).
+- **Spec-correctness note:** fetch-back authenticates with `credentials.token`
+  (= TOKEN_B from the POST body), per OCPI 2.2.1 §POST. Token rotation
+  (server issues TOKEN_C, registers party under it) is a pre-existing gap from
+  PR #60, out of scope here.
+- **Next:** M3 #29 (Locations server handler + `locations_router()`, P1 —
+  proven concrete-`Config` router pattern, no new deps) unblocks #30/#32.
+
+---
+
 ## 2026-06-14 (run 11, Sunday) — M2 credentials axum router, clean re-delivery (issue #22)
 
 - **Issue #22:** M2 credentials axum router — `CredentialsConfig` + `credentials_router()`.
